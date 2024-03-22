@@ -35,9 +35,9 @@ if [ -e "${RABBITMQ_SERVER_CERT}" ] && [ -e "${RABBITMQ_SERVER_KEY}" ]; then
 
 	if [ -e "${RABBITMQ_SERVER_CACERT}" ] && [ "${RABBITMQ_SERVER_VERIFY}" = "verify_peer" ]; then
 		cat >>"/var/lib/rabbitmq/rabbitmq.conf" <<-EOF
-			ssl_options.verify = verify_peer
-			ssl_options.fail_if_no_peer_cert = true
 			ssl_options.cacertfile = ${RABBITMQ_SERVER_CACERT}
+			ssl_options.verify = verify_none
+      ssl_options.fail_if_no_peer_cert = false
 		EOF
 	fi
 fi
@@ -56,8 +56,7 @@ cat >/var/lib/rabbitmq/advanced.config<<-EOF
 	{rabbit, [
 		{consumer_timeout, ${RABBITMQ_CONSUMER_TIMEOUT:-14400000}},
 		{default_consumer_prefetch, {false,1}}
-		]
-	}
+	]}
 ].
 EOF
 
