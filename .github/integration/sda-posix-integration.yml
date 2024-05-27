@@ -6,7 +6,7 @@ services:
     container_name: certfixer
     environment:
       - KEYSTORE_PASSWORD=testingthis
-    image: alpine:latest
+    image: alpine:3.19
     volumes:
       - ./scripts:/scripts
       - certs:/certs

@@ -30,7 +30,7 @@ services:
       - /bin/sh
       - /scripts/make_certs.sh
     container_name: certfixer
-    image: alpine:latest
+    image: alpine:3.19
     volumes:
       - ./scripts:/scripts
       - certs:/certs
