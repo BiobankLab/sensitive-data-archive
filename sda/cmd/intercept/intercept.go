@@ -81,7 +81,7 @@ func main() {
 				log.Infof("Don't know schema for message type (corr-id: %s, msgType: %s, message: %s)",
 					delivered.CorrelationId, msgType, delivered.Body)
 
-				unknownSchemaErr := mq.SendMessage(delivered.CorrelationId, mq.Conf.Exchange, "unknown_schema", delivered.Body)
+				unknownSchemaErr := mq.SendMessage(delivered.CorrelationId, conf.Broker.Exchange, "unknown_schema", delivered.Body)
 				if unknownSchemaErr != nil {
 					log.Errorf("Failed to publish message with type: %v, to \"unknown_schema\" queue (corr-id: %s, reason: %v)",
 						msgType, delivered.CorrelationId, unknownSchemaErr)
