@@ -33,6 +33,21 @@ func (suite *ConfigTestSuite) SetupTest() {
 	certPath, _ = os.MkdirTemp("", "gocerts")
 	helper.MakeCerts(certPath)
 
+	rbacFile, err := os.CreateTemp(certPath, "admins")
+	assert.NoError(suite.T(), err)
+	rbac := []byte(`{"policy":[
+{"role":"admin","path":"/c4gh-keys/*","action":"(GET)|(POST)|(PUT)"},
+{"role":"submission","path":"/dataset/create","action":"POST"},
+{"role":"submission","path":"/dataset/release/*dataset","action":"POST"},
+{"role":"submission","path":"/file/ingest","action":"POST"},
+{"role":"submission","path":"/file/accession","action":"POST"}],
+"roles":[{"role":"admin","rolebinding":"submission"},
+{"role":"dummy@example.org","rolebinding":"admin"},
+{"role":"foo@example.org","rolebinding":"submission"}]}`)
+	_, err = rbacFile.Write(rbac)
+	assert.NoError(suite.T(), err)
+
+	viper.Set("api.rbacFile", rbacFile.Name())
 	viper.Set("broker.host", "testhost")
 	viper.Set("broker.port", 123)
 	viper.Set("broker.user", "testuser")
@@ -224,6 +239,8 @@ func (suite *ConfigTestSuite) TestAPIConfiguration() {
 	assert.Equal(suite.T(), true, config.API.Session.HTTPOnly)
 	assert.Equal(suite.T(), "api_session_key", config.API.Session.Name)
 	assert.Equal(suite.T(), -1*time.Second, config.API.Session.Expiration)
+	rbac, _ := os.ReadFile(viper.GetString("api.rbacFile"))
+	assert.Equal(suite.T(), rbac, config.API.RBACpolicy)
 
 	viper.Reset()
 	suite.SetupTest()
@@ -414,6 +431,7 @@ func (suite *ConfigTestSuite) TestConfigAuth_CEGA() {
 	viper.Set("auth.jwt.Issuer", "http://auth:8080")
 	viper.Set("auth.Jwt.privateKey", "nonexistent-key-file")
 	viper.Set("auth.Jwt.signatureAlg", "ES256")
+	viper.Set("auth.Jwt.tokenTTL", 168)
 	_, err = NewConfig("auth")
 	assert.ErrorContains(suite.T(), err, "no such file or directory")
 
@@ -421,6 +439,7 @@ func (suite *ConfigTestSuite) TestConfigAuth_CEGA() {
 	viper.Set("auth.Jwt.privateKey", ECPath+"/ec")
 	c, err := NewConfig("auth")
 	assert.Equal(suite.T(), c.Auth.JwtPrivateKey, fmt.Sprintf("%s/ec", ECPath))
+	assert.Equal(suite.T(), c.Auth.JwtTTL, 168)
 	assert.NoError(suite.T(), err, "unexpected failure")
 }
 

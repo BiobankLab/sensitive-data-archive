@@ -74,6 +74,7 @@ type SyncAPIConf struct {
 }
 
 type APIConf struct {
+	RBACpolicy []byte
 	CACert     string
 	ServerCert string
 	ServerKey  string
@@ -117,6 +118,7 @@ type AuthConf struct {
 	JwtIssuer       string
 	JwtPrivateKey   string
 	JwtSignatureAlg string
+	JwtTTL          int
 	Server          ServerConfig
 	S3Inbox         string
 	ResignJwt       bool
@@ -201,11 +203,11 @@ func NewConfig(app string) (*Config, error) {
 	switch app {
 	case "api":
 		requiredConfVars = []string{
+			"api.rbacFile",
 			"broker.host",
 			"broker.port",
 			"broker.user",
 			"broker.password",
-			"broker.routingkey",
 			"db.host",
 			"db.port",
 			"db.user",
@@ -228,7 +230,7 @@ func NewConfig(app string) (*Config, error) {
 		}
 
 		if viper.GetBool("auth.resignJwt") {
-			requiredConfVars = append(requiredConfVars, []string{"auth.jwt.issuer", "auth.jwt.privateKey", "auth.jwt.signatureAlg"}...)
+			requiredConfVars = append(requiredConfVars, []string{"auth.jwt.issuer", "auth.jwt.privateKey", "auth.jwt.signatureAlg", "auth.jwt.tokenTTL"}...)
 		}
 	case "ingest":
 		requiredConfVars = []string{
@@ -465,6 +467,11 @@ func NewConfig(app string) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		c.API.RBACpolicy, err = os.ReadFile(viper.GetString("api.rbacFile"))
+		if err != nil {
+			return nil, err
+		}
+		c.configSchemas()
 	case "auth":
 		c.Auth.Cega.AuthURL = viper.GetString("auth.cega.authUrl")
 		c.Auth.Cega.ID = viper.GetString("auth.cega.id")
@@ -494,6 +501,7 @@ func NewConfig(app string) (*Config, error) {
 			c.Auth.JwtPrivateKey = viper.GetString("auth.jwt.privateKey")
 			c.Auth.JwtSignatureAlg = viper.GetString("auth.jwt.signatureAlg")
 			c.Auth.JwtIssuer = viper.GetString("auth.jwt.issuer")
+			c.Auth.JwtTTL = viper.GetInt("auth.jwt.tokenTTL")
 
 			if _, err := os.Stat(c.Auth.JwtPrivateKey); err != nil {
 				return nil, err

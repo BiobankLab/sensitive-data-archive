@@ -3,9 +3,11 @@
 package database
 
 import (
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"math"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -634,15 +636,10 @@ func (dbs *SDAdb) getUserFiles(userID string) ([]*SubmissionFileInfo, error) {
 	files := []*SubmissionFileInfo{}
 	db := dbs.DB
 
-	// select all files of the user, each one annotated with its latest event
-	const query = "SELECT f.submission_file_path, e.event, f.created_at " +
-		"FROM sda.files f " +
-		"LEFT JOIN ( " +
-		"SELECT DISTINCT ON (file_id) file_id, started_at, event " +
-		"FROM sda.file_event_log " +
-		"ORDER BY file_id, started_at DESC" +
-		") e ON f.id = e.file_id " +
-		"WHERE f.submission_user = $1; "
+	// select all files (that are not part of a dataset) of the user, each one annotated with its latest event
+	const query = "SELECT f.submission_file_path, e.event, f.created_at FROM sda.files f " +
+		"LEFT JOIN (SELECT DISTINCT ON (file_id) file_id, started_at, event FROM sda.file_event_log ORDER BY file_id, started_at DESC) e ON f.id = e.file_id WHERE f.submission_user = $1 " +
+		"AND f.id NOT IN (SELECT f.id FROM sda.files f RIGHT JOIN sda.file_dataset d ON f.id = d.file_id); "
 
 	// nolint:rowserrcheck
 	rows, err := db.Query(query, userID)
@@ -665,4 +662,268 @@ func (dbs *SDAdb) getUserFiles(userID string) ([]*SubmissionFileInfo, error) {
 	}
 
 	return files, nil
+}
+
+// get the correlation ID for a user-inbox_path combination
+func (dbs *SDAdb) GetCorrID(user, path string) (string, error) {
+	var (
+		corrID string
+		err    error
+	)
+	// 2, 4, 8, 16, 32 seconds between each retry event.
+	for count := 1; count <= RetryTimes; count++ {
+		corrID, err = dbs.getCorrID(user, path)
+		if err == nil || strings.Contains(err.Error(), "sql: no rows in result set") {
+			break
+		}
+		time.Sleep(time.Duration(math.Pow(2, float64(count))) * time.Second)
+	}
+
+	return corrID, err
+}
+func (dbs *SDAdb) getCorrID(user, path string) (string, error) {
+	dbs.checkAndReconnectIfNeeded()
+	db := dbs.DB
+	const query = "SELECT DISTINCT correlation_id FROM sda.file_event_log e RIGHT JOIN sda.files f ON e.file_id = f.id WHERE f.submission_file_path = $1 and f.submission_user = $2 AND NOT EXISTS (SELECT file_id FROM sda.file_dataset WHERE file_id = f.id)"
+
+	var corrID string
+	err := db.QueryRow(query, path, user).Scan(&corrID)
+	if err != nil {
+		return "", err
+	}
+
+	return corrID, nil
+}
+
+// list all users with files not yet assigned to a dataset
+func (dbs *SDAdb) ListActiveUsers() ([]string, error) {
+	dbs.checkAndReconnectIfNeeded()
+	db := dbs.DB
+
+	var users []string
+	rows, err := db.Query("SELECT DISTINCT submission_user FROM sda.files WHERE id NOT IN (SELECT f.id FROM sda.files f RIGHT JOIN sda.file_dataset d ON f.id = d.file_id) ORDER BY submission_user ASC;")
+	if err != nil {
+		return nil, err
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var user string
+		err := rows.Scan(&user)
+		if err != nil {
+			return nil, err
+		}
+
+		users = append(users, user)
+	}
+
+	return users, nil
+}
+
+func (dbs *SDAdb) GetDatasetStatus(datasetID string) (string, error) {
+	var (
+		err    error
+		count  int
+		status string
+	)
+
+	for count == 0 || (err != nil && count < RetryTimes) {
+		status, err = dbs.getDatasetStatus(datasetID)
+		count++
+	}
+
+	return status, err
+}
+func (dbs *SDAdb) getDatasetStatus(datasetID string) (string, error) {
+	dbs.checkAndReconnectIfNeeded()
+	db := dbs.DB
+	const getDatasetEvent = "SELECT event from sda.dataset_event_log WHERE dataset_id = $1 ORDER BY id DESC LIMIT 1;"
+
+	var status string
+	err := db.QueryRow(getDatasetEvent, datasetID).Scan(&status)
+	if err != nil {
+		return "", err
+	}
+
+	return status, nil
+}
+
+// AddKeyHash adds a key hash and key description in the encryption_keys table
+func (dbs *SDAdb) AddKeyHash(keyHash, keyDescription string) error {
+	var err error
+	// 2, 4, 8, 16, 32 seconds between each retry event.
+	for count := 1; count <= RetryTimes; count++ {
+		err = dbs.addKeyHash(keyHash, keyDescription)
+		if err == nil || strings.Contains(err.Error(), "key hash already exists") {
+			break
+		}
+		time.Sleep(time.Duration(math.Pow(2, float64(count))) * time.Second)
+	}
+
+	return err
+}
+
+func (dbs *SDAdb) addKeyHash(keyHash, keyDescription string) error {
+	dbs.checkAndReconnectIfNeeded()
+	db := dbs.DB
+
+	const query = "INSERT INTO sda.encryption_keys(key_hash, description) VALUES($1, $2) ON CONFLICT DO NOTHING;"
+
+	result, err := db.Exec(query, keyHash, keyDescription)
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
+		return errors.New("key hash already exists or no rows were updated")
+	}
+
+	return nil
+}
+
+func (dbs *SDAdb) SetKeyHash(keyHash, fileID string) error {
+	dbs.checkAndReconnectIfNeeded()
+	db := dbs.DB
+
+	query := "UPDATE sda.files SET key_hash = $1 WHERE id = $2;"
+	result, err := db.Exec(query, keyHash, fileID)
+	if err != nil {
+
+		return err
+	}
+	if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
+		return errors.New("something went wrong with the query, zero rows were changed")
+	}
+	log.Debugf("Successfully set key hash for file %v", fileID)
+
+	return nil
+}
+
+type C4ghKeyHash struct {
+	Hash         string `json:"hash"`
+	Description  string `json:"description"`
+	CreatedAt    string `json:"created_at"`
+	DeprecatedAt string `json:"deprecated_at"`
+}
+
+// ListKeyHashes lists the hashes from the encryption_keys table
+func (dbs *SDAdb) ListKeyHashes() ([]C4ghKeyHash, error) {
+	dbs.checkAndReconnectIfNeeded()
+	db := dbs.DB
+
+	const query = "SELECT key_hash, description, created_at, deprecated_at FROM sda.encryption_keys ORDER BY created_at ASC;"
+
+	hashList := []C4ghKeyHash{}
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		h := &C4ghKeyHash{}
+		depr := sql.NullString{}
+		err := rows.Scan(&h.Hash, &h.Description, &h.CreatedAt, &depr)
+		if err != nil {
+			return nil, err
+		}
+		h.DeprecatedAt = depr.String
+
+		hashList = append(hashList, *h)
+	}
+
+	return hashList, nil
+}
+
+func (dbs *SDAdb) DeprecateKeyHash(keyHash string) error {
+	dbs.checkAndReconnectIfNeeded()
+	db := dbs.DB
+
+	const query = "UPDATE sda.encryption_keys set deprecated_at = NOW() WHERE key_hash = $1 AND deprecated_at IS NULL;"
+	result, err := db.Exec(query, keyHash)
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
+		return errors.New("key hash not found or already deprecated")
+	}
+
+	return nil
+}
+
+// ListDatasets lists all datasets as well as the status
+func (dbs *SDAdb) ListDatasets() ([]*DatasetInfo, error) {
+	dbs.checkAndReconnectIfNeeded()
+	db := dbs.DB
+
+	var datasets []*DatasetInfo
+	rows, err := db.Query("SELECT dataset_id,event,event_date FROM sda.dataset_event_log WHERE (dataset_id, event_date) IN (SELECT dataset_id,max(event_date) FROM sda.dataset_event_log GROUP BY dataset_id);")
+	if err != nil {
+		return nil, err
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+
+	for rows.Next() {
+		var di DatasetInfo
+		err := rows.Scan(&di.DatasetID, &di.Status, &di.Timestamp)
+		if err != nil {
+			return nil, err
+		}
+
+		datasets = append(datasets, &di)
+	}
+	rows.Close()
+
+	return datasets, nil
+}
+
+func (dbs *SDAdb) ListUserDatasets(submissionUser string) ([]DatasetInfo, error) {
+	dbs.checkAndReconnectIfNeeded()
+	db := dbs.DB
+
+	query := `SELECT dataset_id,event,event_date FROM sda.dataset_event_log WHERE
+		(dataset_id, event_date) IN (
+			SELECT dataset_id,max(event_date) FROM sda.dataset_event_log WHERE 
+			dataset_id IN (
+				SELECT stable_id FROM sda.datasets WHERE 
+				id IN (
+					SELECT DISTINCT dataset_id FROM sda.file_dataset WHERE 
+					file_id IN (
+						SELECT id FROM sda.files WHERE submission_user = $1 AND stable_id IS NOT NULL
+					)
+				)
+			)
+			GROUP BY dataset_id
+		);`
+
+	rows, err := db.Query(query, submissionUser)
+	if err != nil {
+		return nil, err
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+
+	var datasets []DatasetInfo
+	for rows.Next() {
+		var di DatasetInfo
+		err := rows.Scan(&di.DatasetID, &di.Status, &di.Timestamp)
+		if err != nil {
+			return nil, err
+		}
+
+		datasets = append(datasets, di)
+	}
+	rows.Close()
+
+	return datasets, nil
 }
