@@ -43,6 +43,7 @@ GRANT USAGE, SELECT ON SEQUENCE sda.checksums_id_seq TO ingest;
 GRANT INSERT ON sda.file_event_log TO ingest;
 GRANT SELECT ON sda.file_event_log TO ingest;
 GRANT USAGE, SELECT ON SEQUENCE sda.file_event_log_id_seq TO ingest;
+GRANT SELECT ON sda.encryption_keys TO ingest;
 
 -- legacy schema
 GRANT USAGE ON SCHEMA local_ega TO ingest;
@@ -164,12 +165,13 @@ GRANT USAGE ON SCHEMA sda TO api;
 GRANT SELECT ON sda.files TO api;
 GRANT SELECT ON sda.file_dataset TO api;
 GRANT SELECT ON sda.checksums TO api;
-GRANT SELECT ON sda.file_event_log TO api;
+GRANT SELECT, INSERT ON sda.file_event_log TO api;
 GRANT SELECT ON sda.encryption_keys TO api;
 GRANT SELECT ON sda.datasets TO api;
 GRANT SELECT ON sda.dataset_event_log TO api;
 GRANT INSERT ON sda.encryption_keys TO api;
 GRANT UPDATE ON sda.encryption_keys TO api;
+GRANT USAGE, SELECT ON SEQUENCE sda.file_event_log_id_seq TO api;
 
 -- legacy schema
 GRANT USAGE ON SCHEMA local_ega TO api;
@@ -179,10 +181,15 @@ GRANT SELECT ON local_ega_ebi.file TO api;
 GRANT SELECT ON local_ega_ebi.file_dataset TO api;
 
 --------------------------------------------------------------------------------
+CREATE ROLE auth;
+GRANT USAGE ON SCHEMA sda TO auth;
+GRANT SELECT, INSERT, UPDATE ON sda.userinfo TO auth;
+--------------------------------------------------------------------------------
+
 -- lega_in permissions
 GRANT base, ingest, verify, finalize, sync, api TO lega_in;
 
 -- lega_out permissions
 GRANT mapper, download, api TO lega_out;
 
-GRANT base TO api, download, inbox, ingest, finalize, mapper, verify
+GRANT base TO api, download, inbox, ingest, finalize, mapper, verify, auth;

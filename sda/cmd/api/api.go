@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +26,7 @@ import (
 	"github.com/neicnordic/sensitive-data-archive/internal/database"
 	"github.com/neicnordic/sensitive-data-archive/internal/jsonadapter"
 	"github.com/neicnordic/sensitive-data-archive/internal/schema"
+	"github.com/neicnordic/sensitive-data-archive/internal/storage"
 	"github.com/neicnordic/sensitive-data-archive/internal/userauth"
 	log "github.com/sirupsen/logrus"
 )
@@ -100,11 +102,14 @@ func setup(config *config.Config) *http.Server {
 	r.POST("/c4gh-keys/add", rbac(e), addC4ghHash)                      // Adds a key hash to the database
 	r.GET("/c4gh-keys/list", rbac(e), listC4ghHashes)                   // Lists key hashes in the database
 	r.POST("/c4gh-keys/deprecate/*keyHash", rbac(e), deprecateC4ghHash) // Deprecate a given key hash
+	r.DELETE("/file/:username/:fileid", rbac(e), deleteFile)            // Delete a file from inbox
 	// submission endpoints below here
 	r.POST("/file/ingest", rbac(e), ingestFile)                  // start ingestion of a file
 	r.POST("/file/accession", rbac(e), setAccession)             // assign accession ID to a file
+	r.PUT("/file/verify/:accession", rbac(e), reVerifyFile)      // trigger reverification of a file
 	r.POST("/dataset/create", rbac(e), createDataset)            // maps a set of files to a dataset
 	r.POST("/dataset/release/*dataset", rbac(e), releaseDataset) // Releases a dataset to be accessible
+	r.PUT("/dataset/verify/*dataset", rbac(e), reVerifyDataset)  // Re-verify all files in the dataset
 	r.GET("/datasets/list", rbac(e), listAllDatasets)            // Lists all datasets with their status
 	r.GET("/datasets/list/:username", rbac(e), listUserDatasets) // Lists datasets with their status for a specififc user
 	r.GET("/users", rbac(e), listActiveUsers)                    // Lists all users
@@ -261,7 +266,7 @@ func ingestFile(c *gin.Context) {
 		return
 	}
 
-	corrID, err := Conf.API.DB.GetCorrID(ingest.User, ingest.FilePath)
+	corrID, err := Conf.API.DB.GetCorrID(ingest.User, ingest.FilePath, "")
 	if err != nil {
 		switch {
 		case corrID == "":
@@ -275,6 +280,63 @@ func ingestFile(c *gin.Context) {
 
 	err = Conf.API.MQ.SendMessage(corrID, Conf.Broker.Exchange, "ingest", marshaledMsg)
 	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
+
+		return
+	}
+
+	c.Status(http.StatusOK)
+}
+
+// The deleteFile function deletes files from the inbox and marks them as
+// discarded in the db. Files are identified by their ids and the user id.
+func deleteFile(c *gin.Context) {
+	inbox, err := storage.NewBackend(Conf.Inbox)
+	if err != nil {
+		log.Error(err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
+
+		return
+	}
+
+	submissionUser := c.Param("username")
+	log.Debug("submission user:", submissionUser)
+
+	fileID := c.Param("fileid")
+	fileID = strings.TrimPrefix(fileID, "/")
+	log.Debug("submission file:", fileID)
+	if fileID == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, "file ID is required")
+
+		return
+	}
+
+	// Get the file path from the fileID and submission user
+	filePath, err := Conf.API.DB.GetInboxFilePathFromID(submissionUser, fileID)
+	if err != nil {
+		log.Errorf("getting file from fileID failed, reason: (%v)", err)
+		c.AbortWithStatusJSON(http.StatusNotFound, "File could not be found in inbox")
+
+		return
+	}
+
+	var RetryTimes = 5
+	for count := 1; count <= RetryTimes; count++ {
+		err = inbox.RemoveFile(filePath)
+		if err == nil {
+			break
+		}
+		log.Errorf("Remove file from inbox failed, reason: %v", err)
+		if count == 5 {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, ("remove file from inbox failed"))
+
+			return
+		}
+		time.Sleep(time.Duration(math.Pow(2, float64(count))) * time.Second)
+	}
+
+	if err := Conf.API.DB.UpdateFileEventLog(fileID, "disabled", fileID, "api", "{}", "{}"); err != nil {
+		log.Errorf("set status deleted failed, reason: (%v)", err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
 
 		return
@@ -297,7 +359,7 @@ func setAccession(c *gin.Context) {
 		return
 	}
 
-	corrID, err := Conf.API.DB.GetCorrID(accession.User, accession.FilePath)
+	corrID, err := Conf.API.DB.GetCorrID(accession.User, accession.FilePath, "")
 	if err != nil {
 		switch {
 		case corrID == "":
@@ -363,28 +425,27 @@ func createDataset(c *gin.Context) {
 		if err != nil {
 			switch {
 			case err.Error() == "sql: no rows in result set":
-				log.Debugln(err.Error())
+				log.Errorln(err.Error())
 				c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("accession ID not found: %s", stableID))
 
 				return
 			default:
-				log.Debugln(err.Error())
+				log.Errorln(err.Error())
 				c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
 
 				return
 			}
 		}
-
-		_, err = Conf.API.DB.GetCorrID(dataset.User, inboxPath)
+		_, err = Conf.API.DB.GetCorrID(dataset.User, inboxPath, stableID)
 		if err != nil {
 			switch {
 			case err.Error() == "sql: no rows in result set":
-				log.Debugln(err.Error())
+				log.Errorln(err.Error())
 				c.AbortWithStatusJSON(http.StatusBadRequest, "accession ID owned by other user")
 
 				return
 			default:
-				log.Debugln(err.Error())
+				log.Errorln(err.Error())
 				c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
 
 				return
@@ -476,6 +537,8 @@ func listActiveUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, users)
 }
 
+// listUserFiles returns a list of files for a specific user
+// If the file has status disabled, the file will be skipped
 func listUserFiles(c *gin.Context) {
 	username := c.Param("username")
 	username = strings.TrimPrefix(username, "/")
@@ -641,4 +704,76 @@ func listDatasets(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, datasets)
+}
+
+func reVerify(c *gin.Context, accessionID string) (*gin.Context, error) {
+	reVerify, err := Conf.API.DB.GetReVerificationData(accessionID)
+	if err != nil {
+		if strings.Contains(err.Error(), "sql: no rows in result set") {
+			c.AbortWithStatusJSON(http.StatusNotFound, "accession ID not found")
+		} else {
+			log.Errorln("failed to get file data")
+			c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
+		}
+
+		return c, err
+	}
+	corrID, err := Conf.API.DB.GetCorrID(reVerify.User, reVerify.FilePath, accessionID)
+	if err != nil {
+		log.Errorf("failed to get CorrID for %s, %s", reVerify.User, reVerify.FilePath)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
+
+		return c, err
+	}
+
+	marshaledMsg, _ := json.Marshal(&reVerify)
+	if err := schema.ValidateJSON(fmt.Sprintf("%s/ingestion-verification.json", Conf.Broker.SchemasPath), marshaledMsg); err != nil {
+		log.Errorln(err.Error())
+		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
+
+		return c, err
+	}
+
+	err = Conf.API.MQ.SendMessage(corrID, Conf.Broker.Exchange, "archived", marshaledMsg)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
+
+		return c, err
+	}
+
+	return c, nil
+}
+
+func reVerifyFile(c *gin.Context) {
+	accessionID := strings.TrimPrefix(c.Param("accession"), "/")
+	c, err = reVerify(c, accessionID)
+	if err != nil {
+		return
+	}
+
+	c.Status(http.StatusOK)
+}
+
+func reVerifyDataset(c *gin.Context) {
+	dataset := strings.TrimPrefix(c.Param("dataset"), "/")
+	accessions, err := Conf.API.DB.GetDatasetFiles(dataset)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
+
+		return
+	}
+	if accessions == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, "dataset not found")
+
+		return
+	}
+
+	for _, accession := range accessions {
+		c, err = reVerify(c, accession)
+		if err != nil {
+			return
+		}
+	}
+
+	c.Status(http.StatusOK)
 }
