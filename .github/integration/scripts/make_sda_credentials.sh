@@ -14,7 +14,7 @@ apt-get -o DPkg::Lock::Timeout=60 install -y curl jq openssh-client openssl post
 pip install --upgrade pip > /dev/null
 pip install aiohttp Authlib joserfc requests > /dev/null
 
-for n in download finalize inbox ingest mapper sync verify; do
+for n in api auth download finalize inbox ingest mapper sync verify; do
     echo "creating credentials for: $n"
     psql -U postgres -h postgres -d sda -c "ALTER ROLE $n LOGIN PASSWORD '$n';"
     psql -U postgres -h postgres -d sda -c "GRANT base TO $n;"
@@ -61,10 +61,17 @@ if [ ! -f "/shared/crypt4gh" ]; then
     latest_c4gh=$(curl --retry 100 -sL https://api.github.com/repos/neicnordic/crypt4gh/releases/latest | jq -r '.name')
     curl --retry 100 -s -L "https://github.com/neicnordic/crypt4gh/releases/download/$latest_c4gh/crypt4gh_linux_x86_64.tar.gz" | tar -xz -C /shared/ && chmod +x /shared/crypt4gh
 fi
+
 if [ ! -f "/shared/c4gh.sec.pem" ]; then
     echo "creating crypth4gh key"
     /shared/crypt4gh generate -n /shared/c4gh -p c4ghpass
 fi
+
+if [ ! -f "/shared/c4gh1.sec.pem" ]; then
+    echo "creating crypth4gh key"
+    /shared/crypt4gh generate -n /shared/c4gh1 -p c4ghpass
+fi
+
 if [ ! -f "/shared/sync.sec.pem" ]; then
     echo "creating sync crypth4gh key"
     /shared/crypt4gh generate -n /shared/sync -p syncPass

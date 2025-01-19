@@ -20,7 +20,7 @@ bootstrap: go-version-check docker-version-check
 		fi
 		@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
 		sh -s -- -b $$(go env GOPATH)/bin
-		GO111MODULE=off go get golang.org/x/tools/cmd/goimports
+		go install golang.org/x/tools/cmd/goimports@latest
 
 # build containers
 build-all: build-postgresql build-rabbitmq build-sda build-sda-download build-sda-sftp-inbox build-sda-admin
@@ -49,9 +49,10 @@ go-version-check:
 		( $${GO_VERSION_ARR[1]} -lt $${GO_VERSION_REQ[1]} ||\
 		( $${GO_VERSION_ARR[1]} -eq $${GO_VERSION_REQ[1]} && $${GO_VERSION_ARR[2]} -lt $${GO_VERSION_REQ[2]} )))\
 	]]; then\
-		echo "SDA requires go $${GO_VERSION_MIN} to build; found $${GO_VERSION}.";\
-		exit 1;\
-	fi;
+		echo "SDA requires go $${GO_VERSION_MIN} to build; found $${GO_VERSION}."; \
+		exit 1; \
+	fi; \
+	echo "GO version: $${GO_VERSION}."
 
 docker-version-check:
 	@DOCKER_VERSION=$$(docker version -f "{{.Server.Version}}" | cut -d'.' -f 1); \
@@ -66,8 +67,26 @@ docker-version-check:
 	fi; \
 	if [ ! $$(docker buildx version | cut -d' ' -f 2) ]; then \
 		echo "Docker buildx does not exist can't continue"; \
-	fi;
+		exit 1;\
+	fi; \
+	echo "Docker version: $${DOCKER_VERSION}."; \
+	echo "Docker Compose version: $${DOCKER_COMPOSE_VERSION}."
 
+# bring up the services
+sda-s3-up:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-s3-integration.yml up -d
+sda-posix-up:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-posix-integration.yml up -d
+sda-sync-up:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-sync-integration.yml up -d
+
+# bring down the services
+sda-s3-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-s3-integration.yml down -v --remove-orphans
+sda-posix-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-posix-integration.yml down -v --remove-orphans
+sda-sync-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-sync-integration.yml down -v --remove-orphans
 
 # run intrgration tests, same as being run in Github Actions during a PR
 integrationtest-postgres: build-postgresql
@@ -76,11 +95,38 @@ integrationtest-postgres: build-postgresql
 integrationtest-rabbitmq: build-rabbitmq build-sda
 	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/rabbitmq-federation.yml run federation_test
 	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/rabbitmq-federation.yml down -v --remove-orphans
+
 integrationtest-sda: build-all
-	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-s3-integration.yml run integration_test
-	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-s3-integration.yml down -v --remove-orphans
 	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-posix-integration.yml run integration_test
 	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-posix-integration.yml down -v --remove-orphans
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-s3-integration.yml run integration_test
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-s3-integration.yml down -v --remove-orphans
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-sync-integration.yml run integration_test
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-sync-integration.yml down -v --remove-orphans
+
+integrationtest-sda-posix: build-all
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-posix-integration.yml run integration_test
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-posix-integration.yml down -v --remove-orphans
+integrationtest-sda-posix-run:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-posix-integration.yml run integration_test
+integrationtest-sda-posix-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-posix-integration.yml down -v --remove-orphans
+
+integrationtest-sda-s3: build-all
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-s3-integration.yml run integration_test
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-s3-integration.yml down -v --remove-orphans
+integrationtest-sda-s3-run:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-s3-integration.yml run integration_test
+integrationtest-sda-s3-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-s3-integration.yml down -v --remove-orphans
+
+integrationtest-sda-sync: build-all
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-sync-integration.yml run integration_test
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-sync-integration.yml down -v --remove-orphans
+integrationtest-sda-sync-run:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-sync-integration.yml run integration_test
+integrationtest-sda-sync-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-sync-integration.yml down -v --remove-orphans
 
 # lint go code
 lint-all: lint-sda lint-sda-download lint-sda-admin
@@ -104,3 +150,40 @@ test-sda-sftp-inbox:
 	@docker run --rm -v ./sda-sftp-inbox:/inbox maven:3.9.4-eclipse-temurin-21-alpine sh -c "cd /inbox && mvn test -B"
 test-sda-admin:
 	@cd sda-admin && go test ./... -count=1
+
+# local k8s with k3d
+k3d-version-check: SHELL:=/bin/bash
+k3d-version-check:
+	@K3D_VERSION=$$(k3d version | cut -d'v' -f 3 | head -n 1); \
+	IFS="." read -r -a K3D_VERSION_ARR <<< "$${K3D_VERSION}"; \
+	IFS="." read -r -a K3D_VERSION_REQ <<< 5.7.0; \
+	if [[ $${K3D_VERSION_ARR[0]} -lt $${K3D_VERSION_REQ[0]} ||\
+		( $${K3D_VERSION_ARR[0]} -eq $${K3D_VERSION_REQ[0]} &&\
+		( $${K3D_VERSION_ARR[1]} -lt $${K3D_VERSION_REQ[1]} ||\
+		( $${K3D_VERSION_ARR[1]} -eq $${K3D_VERSION_REQ[1]} && $${K3D_VERSION_ARR[2]} -lt $${K3D_VERSION_REQ[2]} )))\
+	]]; then\
+		echo "Helm chart testing requires k3d $${K3D_VERSION_MIN}.";\
+		exit 1;\
+	fi; \
+	echo "detected k3d version: $${K3D_VERSION}"
+	@if [ ! $$(command -v kubectl) ]; then\
+		echo "kubectl is missing";\
+	fi
+k3d-create-cluster:
+	@k3d cluster create
+k3d-delete-cluster:
+	@k3d cluster delete
+k3d-deploy-dependencies:
+	@bash .github/integration/scripts/charts/dependencies.sh local
+k3d-import-images: build-all
+	@bash .github/integration/scripts/charts/import_local_images.sh k3s-default
+k3d-deploy-postgres:
+	@bash .github/integration/scripts/charts/deploy_charts.sh sda-db "$$(date +%F)" false
+k3d-deploy-rabbitmq:
+	@bash .github/integration/scripts/charts/deploy_charts.sh sda-mq "$$(date +%F)" false
+k3d-deploy-sda-s3:
+	@bash .github/integration/scripts/charts/deploy_charts.sh sda-svc "$$(date +%F)" false s3
+k3d-deploy-sda-posix:
+	@bash .github/integration/scripts/charts/deploy_charts.sh sda-svc "$$(date +%F)" false posix
+k3d-cleanup-all-deployments:
+	@bash .github/integration/scripts/charts/cleanup.sh

@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,7 +14,9 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/neicnordic/crypt4gh/keys"
 	"github.com/neicnordic/crypt4gh/model/headers"
 	"github.com/neicnordic/crypt4gh/streaming"
 	"github.com/neicnordic/sensitive-data-archive/internal/broker"
@@ -59,7 +62,7 @@ func main() {
 		sigc <- syscall.SIGINT
 		panic(err)
 	}
-	key, err := config.GetC4GHKey()
+	archiveKeyList, err := config.GetC4GHprivateKeys()
 	if err != nil {
 		log.Error(err)
 		sigc <- syscall.SIGINT
@@ -98,6 +101,24 @@ func main() {
 	var message schema.IngestionTrigger
 
 	go func() {
+		start := time.Now()
+		for i := 1; i > 0; i++ {
+			h, err := db.ListKeyHashes()
+			if err != nil {
+				log.Errorln(err.Error())
+			}
+			if len(h) != 0 {
+				break
+			}
+
+			time.Sleep(time.Duration(30 * time.Second))
+			if time.Since(start).Seconds() >= float64(300) {
+				log.Errorln("no crypt4gh key hash registered, restarting")
+				forever <- false
+			}
+			log.Errorln("no crypt4gh key hash registered")
+		}
+
 		messages, err := mq.GetMessages(conf.Broker.Queue)
 		if err != nil {
 			log.Fatal(err)
@@ -363,11 +384,25 @@ func main() {
 
 					//nolint:nestif
 					if bytesRead <= int64(len(readBuffer)) {
-						header, err := tryDecrypt(key, readBuffer)
-						if err != nil {
-							log.Errorf("Trying to decrypt start of file failed, reason: (%s)", err.Error())
-							if err := db.UpdateFileEventLog(fileID, "error", delivered.CorrelationId, "ingest", fmt.Sprintf("{\"error\" : \"%s\"}", err.Error()), string(delivered.Body)); err != nil {
-								log.Errorf("failed to set ingestion status for file from message: %v", delivered.CorrelationId)
+						var privateKey *[32]byte
+						var header []byte
+
+						// Iterate over the key list to try decryption
+						for _, key := range archiveKeyList {
+							header, err = tryDecrypt(key, readBuffer)
+							if err == nil {
+								privateKey = key
+
+								break
+							}
+							log.Warnf("Decryption failed with key, trying next key. Reason: (%s)", err.Error())
+						}
+
+						// Check if decryption was successful with any key
+						if privateKey == nil {
+							log.Errorf("All keys failed to decrypt the submitted file")
+							if err := db.UpdateFileEventLog(fileID, "error", delivered.CorrelationId, "ingest", `{"error" : "Decryption failed with all available key(s)"}`, string(delivered.Body)); err != nil {
+								log.Errorf("Failed to set ingestion status for file from message: %v", delivered.CorrelationId)
 							}
 
 							if err := delivered.Ack(false); err != nil {
@@ -376,13 +411,27 @@ func main() {
 
 							// Send the message to an error queue so it can be analyzed.
 							fileError := broker.InfoError{
-								Error:           "Trying to decrypt start of file failed",
-								Reason:          err.Error(),
+								Error:           "Trying to decrypt the submitted file failed",
+								Reason:          "Decryption failed with the available key(s)",
 								OriginalMessage: message,
 							}
 							body, _ := json.Marshal(fileError)
 							if err := mq.SendMessage(delivered.CorrelationId, conf.Broker.Exchange, "error", body); err != nil {
 								log.Errorf("failed to publish message, reason: (%s)", err.Error())
+							}
+
+							continue mainWorkLoop
+						}
+
+						// Proceed with the successful key
+						// Set the file's hex encoded public key
+						publicKey := keys.DerivePublicKey(*privateKey)
+						keyhash := hex.EncodeToString(publicKey[:])
+						err = db.SetKeyHash(keyhash, fileID)
+						if err != nil {
+							log.Errorf("Key hash %s could not be set for fileID %s: (%s)", keyhash, fileID, err.Error())
+							if err = delivered.Nack(false, true); err != nil {
+								log.Errorf("Failed to Nack message, reason: (%s)", err.Error())
 							}
 
 							continue mainWorkLoop

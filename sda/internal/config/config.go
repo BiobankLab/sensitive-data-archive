@@ -3,7 +3,6 @@ package config
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -75,7 +74,7 @@ type SyncAPIConf struct {
 }
 
 type APIConf struct {
-	Admins     []string
+	RBACpolicy []byte
 	CACert     string
 	ServerCert string
 	ServerKey  string
@@ -84,6 +83,7 @@ type APIConf struct {
 	Session    SessionConfig
 	DB         *database.SDAdb
 	MQ         *broker.AMQPBroker
+	INBOX      storage.Backend
 }
 
 type SessionConfig struct {
@@ -115,6 +115,7 @@ type OrchestratorConf struct {
 
 type AuthConf struct {
 	OIDC            OIDCConfig
+	DB              *database.SDAdb
 	Cega            CegaConfig
 	JwtIssuer       string
 	JwtPrivateKey   string
@@ -148,6 +149,11 @@ type CORSConfig struct {
 	AllowMethods     string
 	AllowHeaders     string
 	AllowCredentials bool
+}
+
+type C4GHprivateKeyConf struct {
+	FilePath   string `mapstructure:"filePath"`
+	Passphrase string `mapstructure:"passphrase"`
 }
 
 // NewConfig initializes and parses the config file and/or environment using
@@ -204,6 +210,7 @@ func NewConfig(app string) (*Config, error) {
 	switch app {
 	case "api":
 		requiredConfVars = []string{
+			"api.rbacFile",
 			"broker.host",
 			"broker.port",
 			"broker.user",
@@ -214,10 +221,23 @@ func NewConfig(app string) (*Config, error) {
 			"db.password",
 			"db.database",
 		}
+		switch viper.GetString("inbox.type") {
+		case S3:
+			requiredConfVars = append(requiredConfVars, []string{"inbox.url", "inbox.accesskey", "inbox.secretkey", "inbox.bucket"}...)
+		case POSIX:
+			requiredConfVars = append(requiredConfVars, []string{"inbox.location"}...)
+		default:
+			return nil, fmt.Errorf("inbox.type not set")
+		}
 	case "auth":
 		requiredConfVars = []string{
 			"auth.s3Inbox",
 			"auth.publicFile",
+			"db.host",
+			"db.port",
+			"db.user",
+			"db.password",
+			"db.database",
 		}
 
 		if viper.GetString("auth.cega.id") != "" && viper.GetString("auth.cega.secret") != "" {
@@ -458,6 +478,8 @@ func NewConfig(app string) (*Config, error) {
 			return nil, err
 		}
 
+		c.configInbox()
+
 		err = c.configAPI()
 		if err != nil {
 			return nil, err
@@ -467,20 +489,9 @@ func NewConfig(app string) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		if viper.IsSet("admin.usersFile") {
-			admins, err := os.ReadFile(viper.GetString("admin.usersFile"))
-			if err != nil {
-				return nil, err
-			}
-
-			if err := json.Unmarshal(admins, &c.API.Admins); err != nil {
-				return nil, err
-			}
-		}
-
-		// This is mainly for convenience when testing stuff
-		if viper.IsSet("admin.users") {
-			c.API.Admins = append(c.API.Admins, strings.Split(string(viper.GetString("admin.users")), ",")...)
+		c.API.RBACpolicy, err = os.ReadFile(viper.GetString("api.rbacFile"))
+		if err != nil {
+			return nil, err
 		}
 		c.configSchemas()
 	case "auth":
@@ -542,6 +553,10 @@ func NewConfig(app string) (*Config, error) {
 		}
 
 		c.Auth.S3Inbox = viper.GetString("auth.s3Inbox")
+		err := c.configDatabase()
+		if err != nil {
+			return nil, err
+		}
 	case "finalize":
 		if viper.GetString("archive.type") != "" && viper.GetString("backup.type") != "" {
 			c.configArchive()
@@ -923,6 +938,10 @@ func (c *Config) configSchemas() {
 	} else {
 		c.Broker.SchemasPath = "/schemas/isolated/"
 	}
+
+	if viper.IsSet("schema.path") {
+		c.Broker.SchemasPath = viper.GetString("schema.path")
+	}
 }
 
 // configS3Storage populates and returns a S3Conf from the
@@ -1050,6 +1069,34 @@ func GetC4GHKey() (*[32]byte, error) {
 	keyFile.Close()
 
 	return &key, nil
+}
+
+// GetC4GHprivateKeys reads and decrypts keys and returns a list of c4gh keys
+func GetC4GHprivateKeys() ([]*[32]byte, error) {
+	// Retrieve the list of key configurations from the YAML file
+	var keySet []C4GHprivateKeyConf
+	if err := viper.UnmarshalKey("c4gh.privateKeys", &keySet); err != nil {
+		return nil, fmt.Errorf("failed to parse key configurations: %v", err)
+	}
+
+	var privateKeys []*[32]byte
+
+	for _, entry := range keySet {
+		keyFile, err := os.Open(entry.FilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open key file %s: %v", entry.FilePath, err)
+		}
+
+		key, err := keys.ReadPrivateKey(keyFile, []byte(entry.Passphrase))
+		keyFile.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read private key from %s: %v", entry.FilePath, err)
+		}
+
+		privateKeys = append(privateKeys, &key)
+	}
+
+	return privateKeys, nil
 }
 
 // GetC4GHPublicKey reads the c4gh public key

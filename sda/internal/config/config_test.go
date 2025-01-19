@@ -11,10 +11,8 @@ import (
 	"testing"
 	"time"
 
-	helper "github.com/neicnordic/sensitive-data-archive/internal/helper"
-
+	"github.com/neicnordic/sensitive-data-archive/internal/helper"
 	log "github.com/sirupsen/logrus"
-
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -33,6 +31,21 @@ func (suite *ConfigTestSuite) SetupTest() {
 	certPath, _ = os.MkdirTemp("", "gocerts")
 	helper.MakeCerts(certPath)
 
+	rbacFile, err := os.CreateTemp(certPath, "admins")
+	assert.NoError(suite.T(), err)
+	rbac := []byte(`{"policy":[
+{"role":"admin","path":"/c4gh-keys/*","action":"(GET)|(POST)|(PUT)"},
+{"role":"submission","path":"/dataset/create","action":"POST"},
+{"role":"submission","path":"/dataset/release/*dataset","action":"POST"},
+{"role":"submission","path":"/file/ingest","action":"POST"},
+{"role":"submission","path":"/file/accession","action":"POST"}],
+"roles":[{"role":"admin","rolebinding":"submission"},
+{"role":"dummy@example.org","rolebinding":"admin"},
+{"role":"foo@example.org","rolebinding":"submission"}]}`)
+	_, err = rbacFile.Write(rbac)
+	assert.NoError(suite.T(), err)
+
+	viper.Set("api.rbacFile", rbacFile.Name())
 	viper.Set("broker.host", "testhost")
 	viper.Set("broker.port", 123)
 	viper.Set("broker.user", "testuser")
@@ -50,6 +63,7 @@ func (suite *ConfigTestSuite) SetupTest() {
 	viper.Set("inbox.accesskey", "testaccess")
 	viper.Set("inbox.secretkey", "testsecret")
 	viper.Set("inbox.bucket", "testbucket")
+	viper.Set("inbox.type", "s3")
 	viper.Set("server.jwtpubkeypath", "testpath")
 	viper.Set("log.level", "debug")
 }
@@ -224,6 +238,8 @@ func (suite *ConfigTestSuite) TestAPIConfiguration() {
 	assert.Equal(suite.T(), true, config.API.Session.HTTPOnly)
 	assert.Equal(suite.T(), "api_session_key", config.API.Session.Name)
 	assert.Equal(suite.T(), -1*time.Second, config.API.Session.Expiration)
+	rbac, _ := os.ReadFile(viper.GetString("api.rbacFile"))
+	assert.Equal(suite.T(), rbac, config.API.RBACpolicy)
 
 	viper.Reset()
 	suite.SetupTest()
@@ -242,27 +258,6 @@ func (suite *ConfigTestSuite) TestAPIConfiguration() {
 	assert.Equal(suite.T(), false, config.API.Session.Secure)
 	assert.Equal(suite.T(), "test", config.API.Session.Domain)
 	assert.Equal(suite.T(), 60*time.Second, config.API.Session.Expiration)
-
-	viper.Reset()
-	suite.SetupTest()
-	adminFile, err := os.CreateTemp("", "admins")
-	assert.NoError(suite.T(), err)
-	_, err = adminFile.Write([]byte(`["foo@example.com","bar@example.com","baz@example.com"]`))
-	assert.NoError(suite.T(), err)
-
-	viper.Set("admin.usersFile", adminFile.Name())
-	cFile, err := NewConfig("api")
-	assert.NoError(suite.T(), err)
-	assert.Equal(suite.T(), []string{"foo@example.com", "bar@example.com", "baz@example.com"}, cFile.API.Admins)
-
-	os.Remove(adminFile.Name())
-
-	viper.Reset()
-	suite.SetupTest()
-	viper.Set("admin.users", "foo@bar.com,bar@foo.com")
-	cList, err := NewConfig("api")
-	assert.NoError(suite.T(), err)
-	assert.Equal(suite.T(), []string{"foo@bar.com", "bar@foo.com"}, cList.API.Admins)
 }
 
 func (suite *ConfigTestSuite) TestNotifyConfiguration() {
@@ -363,6 +358,78 @@ func (suite *ConfigTestSuite) TestGetC4GHKey() {
 	pkBytes, err = GetC4GHKey()
 	assert.NoError(suite.T(), err)
 	assert.NotNil(suite.T(), pkBytes)
+
+	defer os.RemoveAll(keyPath)
+}
+
+func (suite *ConfigTestSuite) TestGetC4GHprivateKeys_AllOK() {
+	keyPath, _ := os.MkdirTemp("", "key")
+	keyFile1 := keyPath + "/c4gh1.key"
+	keyFile2 := keyPath + "/c4gh2.key"
+
+	_, err := helper.CreatePrivateKeyFile(keyFile1, "test")
+	assert.NoError(suite.T(), err)
+	_, err = helper.CreatePrivateKeyFile(keyFile2, "test")
+	assert.NoError(suite.T(), err)
+
+	viper.Set("c4gh.privateKeys", []C4GHprivateKeyConf{
+		{FilePath: keyFile1, Passphrase: "test"},
+		{FilePath: keyFile2, Passphrase: "test"},
+	})
+
+	privateKeys, err := GetC4GHprivateKeys()
+	assert.NoError(suite.T(), err)
+	assert.Len(suite.T(), privateKeys, 2)
+
+	defer os.RemoveAll(keyPath)
+}
+
+func (suite *ConfigTestSuite) TestGetC4GHprivateKeys_MissingKeyPath() {
+	viper.Set("c4gh.privateKeys", []C4GHprivateKeyConf{
+		{FilePath: "/non/existent/path1", Passphrase: "test"},
+	})
+
+	privateKeys, err := GetC4GHprivateKeys()
+	assert.Error(suite.T(), err)
+	assert.Contains(suite.T(), err.Error(), "failed to open key file")
+	assert.Nil(suite.T(), privateKeys)
+}
+
+func (suite *ConfigTestSuite) TestGetC4GHprivateKeys_WrongPassphrase() {
+	keyPath, _ := os.MkdirTemp("", "key")
+	keyFile := keyPath + "/c4gh1.key"
+
+	_, err := helper.CreatePrivateKeyFile(keyFile, "test")
+	assert.NoError(suite.T(), err)
+
+	viper.Set("c4gh.privateKeys", []C4GHprivateKeyConf{
+		{FilePath: keyFile, Passphrase: "wrong"},
+	})
+
+	privateKeys, err := GetC4GHprivateKeys()
+	assert.Error(suite.T(), err)
+	assert.Contains(suite.T(), err.Error(), "chacha20poly1305: message authentication faile")
+	assert.Nil(suite.T(), privateKeys)
+
+	defer os.RemoveAll(keyPath)
+}
+
+func (suite *ConfigTestSuite) TestGetC4GHprivateKeys_InvalidKey() {
+	key := "not a valid key"
+	keyPath, _ := os.MkdirTemp("", "key")
+	keyFile := keyPath + "/c4gh1.key"
+
+	err := os.WriteFile(keyFile, []byte(key), 0600)
+	assert.NoError(suite.T(), err)
+
+	viper.Set("c4gh.privateKeys", []C4GHprivateKeyConf{
+		{FilePath: keyFile, Passphrase: "wrong"},
+	})
+
+	privateKeys, err := GetC4GHprivateKeys()
+	assert.Error(suite.T(), err)
+	assert.Contains(suite.T(), err.Error(), "read of unrecognized private key format")
+	assert.Nil(suite.T(), privateKeys)
 
 	defer os.RemoveAll(keyPath)
 }

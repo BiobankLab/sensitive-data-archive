@@ -76,10 +76,9 @@ Parameter | Description | Default
 `global.backupArchive.volumePath` | Path to the mounted `posix` volume. |`/backup`
 `global.backupArchive.nfsServer` | URL or IP address to a NFS server. |`""`
 `global.backupArchive.nfsPath` | Path on the NFS server for the backup archive. |`""`
-`global.api.adminFileSecret` | A secret holding a JSON file named `admin.json` containg a list of identifiers |``
-`global.api.adminUsers` | A list of identifiers of the users with admin privileges |``
 `global.api.jwtPubKeyName` | Public key used to verify the JWT. |``
 `global.api.jwtSecret` | The name of the secret holding the JWT public key |``
+`global.api.rbacFileSecret` | A secret holding a JSON file named `rbac.json` containg the RBAC policies, see example in the [api.md](https://github.com/neicnordic/sensitive-data-archive/blob/main/sda/cmd/api/api.md#configure-rbac) |``
 `global.auth.jwtAlg` | Key type to sign the JWT, available options are RS265 & ES256, Must match the key type |`"ES256"`
 `global.auth.jwtKey` | Private key used to sign the JWT. |`""`
 `global.auth.jwtPub` | Public key ues to verify the JWT. |`""`
@@ -124,7 +123,8 @@ Parameter | Description | Default
 `global.doa.outbox.s3AccessKey` | Outbox S3 Access Key | `null`
 `global.doa.outbox.s3SecretKey` | Outbox S3 Secret key | `null`
 `global.download.enabled` | Deploy the download service | `true`
-`global.download.serveUnencryptedData` | Whether the download service serves unencrypted data | `false`
+`global.download.serveDecrypted.c4ghKeyFile` | Transient private C4GH key | `""`
+`global.download.serveDecrypted.secretName` | Secret holding the transient private C4GH key and its passphrase | `""`
 `global.download.sessionExpiration` | Session key expiration time in seconds | `28800`
 `global.download.trusted.configPath` | Path to the ISS config file | `$secrets/iss`
 `global.download.trusted.configFile` | Name of ISS config file | `iss.json`
@@ -178,6 +178,8 @@ Parameter | Description | Default
 `credentials.api.dbUser` | Database user for api | `""`
 `credentials.api.dbPassword` | Database password for api | `""`
 `credentials.api.mqUser` | Broker user for api | `""`
+`credentials.auth.dbUser` | Database user for auth | `""`
+`credentials.auth.dbPassword` | Database password for auth | `""`
 `credentials.api.mqPassword` | Broker password for api | `""`
 `credentials.doa.dbUser` | Database user for doa | `""`
 `credentials.doa.dbPassword` | Database password for doa| `""`

@@ -26,7 +26,11 @@ VALUES (0, now(), 'Created with version'),
        (9, now(), 'Add dataset event log'),
        (10, now(), 'Create Inbox user'),
        (11, now(), 'Grant select permission to download on dataset_event_log'),
-       (12, now(), 'Add key hash');
+       (12, now(), 'Add key hash'),
+       (13, now(), 'Create API user'),
+       (14, now(), 'Create Auth user'),
+       (15, now(), 'Give API user insert priviledge in logs table'),
+       (16, now(), 'Give ingest user select priviledge in encryption_keys table');
 
 -- Datasets are used to group files, and permissions are set on the dataset
 -- level
@@ -71,6 +75,14 @@ CREATE TABLE files (
     last_modified        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT clock_timestamp(),
 
     CONSTRAINT unique_ingested UNIQUE(submission_file_path, archive_file_path)
+);
+
+-- The user info is used by auth to be able to link users to their name and email
+CREATE TABLE userinfo (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT,
+    email               TEXT,
+    groups              TEXT[]
 );
 
 -- To allow for multiple checksums per file, we use a dedicated table for it

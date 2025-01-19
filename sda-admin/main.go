@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/neicnordic/sensitive-data-archive/sda-admin/c4ghkeyhash"
 	"github.com/neicnordic/sensitive-data-archive/sda-admin/dataset"
 	"github.com/neicnordic/sensitive-data-archive/sda-admin/file"
 	"github.com/neicnordic/sensitive-data-archive/sda-admin/helpers"
 	"github.com/neicnordic/sensitive-data-archive/sda-admin/user"
 )
 
-var version = "1.0.0"
+var version = "development"
 
 var (
 	apiURI string
@@ -29,7 +30,7 @@ Commands:
                                 Trigger ingestion of a given file.
   file set-accession -filepath FILEPATH -user USERNAME -accession-id accessionID
                                 Assign accession ID to a file.
-  dataset create -dataset-id DATASET_ID accessionID [accessionID ...]
+  dataset create -user SUBMISSION_USER -dataset-id DATASET_ID accessionID [accessionID ...]
                                 Create a dataset from a list of accession IDs and a dataset ID.
   dataset release -dataset-id DATASET_ID
                                 Release a dataset for downloading.
@@ -91,7 +92,7 @@ Options:
   -accession-id ID     Specify the accession ID to assign to the file.`
 
 var datasetUsage = `Create a dataset:
-  Usage: sda-admin dataset create -dataset-id DATASET_ID [ACCESSION_ID ...]
+  Usage: sda-admin dataset create -user SUBMISSION_USER -dataset-id DATASET_ID [ACCESSION_ID ...]
     Create a dataset from a list of accession IDs and a dataset ID.
     
 Release a dataset:
@@ -104,8 +105,8 @@ Options:
 
 Use 'sda-admin help dataset <command>' for information on a specific command.`
 
-var datasetCreateUsage = `Usage: sda-admin dataset create -dataset-id DATASET_ID [ACCESSION_ID ...]
-  Create a dataset from a list of accession IDs and a dataset ID.
+var datasetCreateUsage = `Usage: sda-admin dataset create -user SUBMISSION_USER -dataset-id DATASET_ID [ACCESSION_ID ...]
+  Create a dataset from a list of accession IDs and a dataset ID belonging to a given user.
 
 Options:
   -dataset-id DATASET_ID    Specify the unique identifier for the dataset.
@@ -116,6 +117,40 @@ var datasetReleaseUsage = `Usage: sda-admin dataset release -dataset-id DATASET_
 
 Options:
   -dataset-id DATASET_ID    Specify the unique identifier for the dataset.`
+
+var c4ghHashUsage = `Handles the crypt4gh keys in the system.
+
+Usage: sda-admin c4gh-hash add -filepath FILEPATH -description DESCRIPTION
+Registers a new key hash.
+
+Options:
+  -filepath FILEPATH       Specify the path of the public key to register in the key hash table.
+  -description DESCRIPTION Description for the Crypt4gh key.
+
+Usage: sda-admin c4gh-hash deprecate -hash KEYHASH
+Deprecates a keyhash
+
+Options:
+  -hash KEYHASH The keyhash that should be deprecated
+
+Usage: sda-admin c4gh-hash list
+Lists all key hashes in the system`
+
+var c4ghHashAddUsage = `Usage: sda-admin c4gh-hash add -filepath FILEPATH -description DESCRIPTION
+Registers a new key hash.
+
+Options:
+  -filepath FILEPATH       Specify the path of the public key to register in the key hash table.
+  -description DESCRIPTION Description for the Crypt4gh key.`
+
+var c4ghHashDeprecateUsage = `Usage: sda-admin c4gh-hash deprecate -hash KEYHASH
+Deprecates a keyhash
+
+Options:
+  -hash KEYHASH The keyhash that should be deprecated`
+
+var c4ghHashListUsage = `Usage: sda-admin c4gh-hash list
+Lists all key hashes in the system.`
 
 func printVersion() {
 	fmt.Printf("sda-admin %s\n", version)
@@ -179,6 +214,10 @@ func handleHelpCommand() error {
 		}
 	case "dataset":
 		if err := handleHelpDataset(); err != nil {
+			return err
+		}
+	case "c4gh-hash":
+		if err := handleHelpC4ghKeyHash(); err != nil {
 			return err
 		}
 	default:
@@ -371,8 +410,9 @@ func handleDatasetCommand() error {
 
 func handleDatasetCreateCommand() error {
 	datasetCreateCmd := flag.NewFlagSet("create", flag.ExitOnError)
-	var datasetID string
+	var datasetID, username string
 	datasetCreateCmd.StringVar(&datasetID, "dataset-id", "", "ID of the dataset to create")
+	datasetCreateCmd.StringVar(&username, "user", "", "Username to associate with the file")
 
 	if err := datasetCreateCmd.Parse(flag.Args()[2:]); err != nil {
 		return fmt.Errorf("error: failed to parse command line arguments, reason: %v", err)
@@ -384,7 +424,11 @@ func handleDatasetCreateCommand() error {
 		return fmt.Errorf("error: -dataset-id and at least one accession ID are required.\n%s", datasetCreateUsage)
 	}
 
-	err := dataset.Create(apiURI, token, datasetID, accessionIDs)
+	if username == "" {
+		return fmt.Errorf("error: -user is required.\n%s", datasetCreateUsage)
+	}
+
+	err := dataset.Create(apiURI, token, datasetID, username, accessionIDs)
 	if err != nil {
 		return fmt.Errorf("error: failed to create dataset, reason: %v", err)
 	}
@@ -408,6 +452,99 @@ func handleDatasetReleaseCommand() error {
 	err := dataset.Release(apiURI, token, datasetID)
 	if err != nil {
 		return fmt.Errorf("error: failed to release dataset, reason: %v", err)
+	}
+
+	return nil
+}
+
+func handleHelpC4ghKeyHash() error {
+	switch {
+	case flag.NArg() == 2:
+		fmt.Println(c4ghHashUsage)
+	case flag.Arg(2) == "add":
+		fmt.Println(c4ghHashAddUsage)
+	case flag.Arg(2) == "deprecate":
+		fmt.Println(c4ghHashDeprecateUsage)
+	case flag.Arg(2) == "list":
+		fmt.Println(c4ghHashListUsage)
+	default:
+		return fmt.Errorf("unknown subcommand '%s' for '%s'.\n%s", flag.Arg(2), flag.Arg(1), c4ghHashUsage)
+	}
+
+	return nil
+}
+func handleC4ghKeyHashCommand() error {
+	if flag.NArg() < 2 {
+		return fmt.Errorf("error: 'c4gh-hash' requires a subcommand (add, deprecate or list).\n%s", c4ghHashUsage)
+	}
+
+	switch flag.Arg(1) {
+	case "add":
+		if err := handleC4ghKeyHashAddCommand(); err != nil {
+			return err
+		}
+	case "deprecate":
+		if err := handleC4ghKeyHashDeprecateCommand(); err != nil {
+			return err
+		}
+	case "list":
+		if err := handleC4ghHashListCommand(); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unknown subcommand '%s' for '%s'.\n%s", flag.Arg(1), flag.Arg(0), c4ghHashUsage)
+	}
+
+	return nil
+}
+
+func handleC4ghKeyHashAddCommand() error {
+	c4ghAddCmd := flag.NewFlagSet("add", flag.ExitOnError)
+	var description, filepath string
+	c4ghAddCmd.StringVar(&description, "description", "", "")
+	c4ghAddCmd.StringVar(&filepath, "filepath", "", "Filepath to cr4pt4gh public key")
+
+	if err := c4ghAddCmd.Parse(flag.Args()[2:]); err != nil {
+		return fmt.Errorf("error: failed to parse command line arguments, reason: %v", err)
+	}
+
+	if filepath == "" {
+		return fmt.Errorf("error: -filepath is required.\n%s", c4ghHashAddUsage)
+	}
+
+	err := c4ghkeyhash.Add(apiURI, token, filepath, description)
+	if err != nil {
+		return fmt.Errorf("error: failed to release dataset, reason: %v", err)
+	}
+
+	return nil
+}
+
+func handleC4ghKeyHashDeprecateCommand() error {
+	c4ghDeprecateCmd := flag.NewFlagSet("deprecate", flag.ExitOnError)
+	var hash string
+	c4ghDeprecateCmd.StringVar(&hash, "hash", "", "hash of the key to deprecate")
+
+	if err := c4ghDeprecateCmd.Parse(flag.Args()[2:]); err != nil {
+		return fmt.Errorf("error: failed to parse command line arguments, reason: %v", err)
+	}
+
+	if hash == "" {
+		return fmt.Errorf("error: -hash string is required.\n%s", c4ghHashDeprecateUsage)
+	}
+
+	err := c4ghkeyhash.Deprecate(apiURI, token, hash)
+	if err != nil {
+		return fmt.Errorf("error: failed to release dataset, reason: %v", err)
+	}
+
+	return nil
+}
+
+func handleC4ghHashListCommand() error {
+	err := c4ghkeyhash.List(apiURI, token)
+	if err != nil {
+		return fmt.Errorf("error: failed to list crypt4gh hashes, reason: %v", err)
 	}
 
 	return nil
@@ -442,6 +579,11 @@ func main() {
 		}
 	case "version":
 		printVersion()
+	case "c4gh-hash":
+		if err := handleC4ghKeyHashCommand(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command '%s'.\n%s\n", flag.Arg(0), usage)
 		os.Exit(1)

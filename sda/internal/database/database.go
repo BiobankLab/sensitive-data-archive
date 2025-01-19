@@ -8,9 +8,6 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-
-	// Needed implicitly to enable Postgres driver
-	_ "github.com/lib/pq"
 )
 
 // DBConf stores information about how to connect to the database backend
@@ -49,9 +46,16 @@ type SyncData struct {
 }
 
 type SubmissionFileInfo struct {
+	FileID    string `json:"fileID"`
 	InboxPath string `json:"inboxPath"`
 	Status    string `json:"fileStatus"`
 	CreateAt  string `json:"createAt"`
+}
+
+type DatasetInfo struct {
+	DatasetID string `json:"datasetID"`
+	Status    string `json:"status"`
+	Timestamp string `json:"timeStamp"`
 }
 
 // SchemaName is the name of the remote database schema to query

@@ -52,6 +52,7 @@ services:
     image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}-rabbitmq
     ports:
       - "15672:15672"
+      - "5672:5672"
     restart: always
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
@@ -208,49 +209,6 @@ services:
       - ./sda/config.yaml:/config.yaml
       - shared:/shared
 
-  sync:
-    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}
-    command: [ sda-sync ]
-    container_name: sync
-    depends_on:
-      credentials:
-        condition: service_completed_successfully
-      minio:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    environment:
-      - BROKER_PASSWORD=sync
-      - BROKER_USER=sync
-      - BROKER_QUEUE=mapping_stream
-      - DB_PASSWORD=sync
-      - DB_USER=sync
-    restart: always
-    volumes:
-      - ./sda/config.yaml:/config.yaml
-      - shared:/shared
-
-  sync-api:
-    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}
-    command: [ sda-syncapi ]
-    container_name: sync-api
-    depends_on:
-      credentials:
-        condition: service_completed_successfully
-      rabbitmq:
-        condition: service_healthy
-    environment:
-      - BROKER_PASSWORD=sync
-      - BROKER_USER=sync
-      - BROKER_EXCHANGE=sda.dead
-    ports:
-      - "18080:8080"
-    restart: always
-    volumes:
-      - ./sda/config.yaml:/config.yaml
-
   oidc:
     container_name: oidc
     command:
@@ -263,6 +221,8 @@ services:
     depends_on:
       credentials:
         condition: service_completed_successfully
+    extra_hosts:
+      - "localhost:host-gateway"
     healthcheck:
       test: ["CMD", "python3", "-c", 'import requests; print(requests.get(url = "http://localhost:8080/jwk").text)']
       interval: 10s
@@ -289,17 +249,17 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-      - BROKER_PASSWORD=ingest
-      - BROKER_USER=ingest
-      - BROKER_ROUTINGKEY=ingest
-      - DB_PASSWORD=download
-      - DB_USER=download
+      - BROKER_PASSWORD=api
+      - BROKER_USER=api
+      - DB_PASSWORD=api
+      - DB_USER=api
     image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}
     ports:
       - "8090:8080"
     restart: always
     volumes:
       - ./sda/config.yaml:/config.yaml
+      - ./sda/rbac.json:/rbac.json
       - shared:/shared
 
   reencrypt:
@@ -345,10 +305,14 @@ services:
     depends_on:
       cega-nss:
         condition: service_started
+      postgres:
+        condition: service_healthy
     environment:
       - AUTH_RESIGNJWT=true
       - AUTH_CEGA_ID=test
       - AUTH_CEGA_SECRET=test
+      - DB_PASSWORD=auth
+      - DB_USER=auth
     image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}
     ports:
       - "8888:8080"
@@ -361,12 +325,20 @@ services:
     command: [ sda-auth ]
     container_name: auth-oidc
     depends_on:
+      postgres:
+        condition: service_healthy
       oidc:
         condition: service_healthy
     environment:
       - AUTH_RESIGNJWT=false
       - OIDC_ID=XC56EL11xx
       - OIDC_SECRET=wHPVQaYXmdDHg
+      - OIDC_PROVIDER=http://localhost:8080
+      - OIDC_REDIRECTURL=http://localhost:8889/oidc/login
+      - DB_PASSWORD=auth
+      - DB_USER=auth
+    extra_hosts:
+      - "localhost:host-gateway"
     image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}
     ports:
       - "8889:8080"
@@ -398,16 +370,14 @@ services:
         condition: service_started
       s3inbox:
         condition: service_started
-      sync:
-        condition: service_started
-      sync-api:
-        condition: service_started
       verify:
          condition: service_started
       api:
          condition: service_started
       reencrypt:
          condition: service_started
+    extra_hosts:
+      - "localhost:host-gateway"
     environment:
       - PGPASSWORD=rootpasswd
       - STORAGETYPE=s3
