@@ -18,11 +18,13 @@ import (
 type OIDCIdentity struct {
 	User                 string
 	Passport             []string
-	Token                string
-	Profile              string
+	RawToken             string
+	ResignedToken        string
+	Fullname             string
 	Email                string
 	EdupersonEntitlement []string
-	ExpDate              string
+	ExpDateRaw           string
+	ExpDateResigned      string
 }
 
 // Configure an OpenID Connect aware OAuth2 client.
@@ -30,7 +32,7 @@ func getOidcClient(conf config.OIDCConfig) (oauth2.Config, *oidc.Provider) {
 	contx := context.Background()
 	provider, err := oidc.NewProvider(contx, conf.Provider)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err) // nolint # FIXME Fatal should only be called from main
 	}
 
 	oauth2Config := oauth2.Config{
@@ -92,7 +94,7 @@ func authenticateWithOidc(oauth2Config oauth2.Config, provider *oidc.Provider, c
 	// Extract custom passports, name and email claims
 	var claims struct {
 		PassportClaim        []string `json:"ga4gh_passport_v1"`
-		ProfileClaim         string   `json:"name"`
+		FullnameClaim        string   `json:"name"`
 		EmailClaim           string   `json:"email"`
 		EdupersonEntitlement []string `json:"eduperson_entitlement"`
 	}
@@ -104,12 +106,14 @@ func authenticateWithOidc(oauth2Config oauth2.Config, provider *oidc.Provider, c
 
 	idStruct = OIDCIdentity{
 		User:                 userInfo.Subject,
-		Token:                rawAccessToken,
+		RawToken:             rawAccessToken,
+		ResignedToken:        rawAccessToken,
 		Passport:             claims.PassportClaim,
-		Profile:              claims.ProfileClaim,
+		Fullname:             claims.FullnameClaim,
 		Email:                claims.EmailClaim,
 		EdupersonEntitlement: claims.EdupersonEntitlement,
-		ExpDate:              rawExpDate,
+		ExpDateRaw:           rawExpDate,
+		ExpDateResigned:      rawExpDate,
 	}
 
 	return idStruct, err

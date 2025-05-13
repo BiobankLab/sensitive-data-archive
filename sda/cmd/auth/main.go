@@ -27,8 +27,9 @@ type LoginOption struct {
 }
 
 type OIDCData struct {
-	S3Conf map[string]string
-	OIDCID OIDCIdentity
+	S3ConfInbox    map[string]string
+	S3ConfDownload map[string]string
+	OIDCID         OIDCIdentity
 }
 
 type AuthHandler struct {
@@ -40,8 +41,10 @@ type AuthHandler struct {
 	pubKey       string
 }
 
-func (auth AuthHandler) getInboxConfig(ctx iris.Context, authType string) {
-
+// getS3Config retrieves S3 config from session flash and serves it as a
+// downloadable s3cmd file with the specified fileName. Redirects to home if
+// config is missing.
+func (auth AuthHandler) getS3Config(ctx iris.Context, authType string, fileName string) {
 	log.Infoln(ctx.Request().URL.Path)
 
 	s := sessions.Get(ctx)
@@ -52,7 +55,8 @@ func (auth AuthHandler) getInboxConfig(ctx iris.Context, authType string) {
 		return
 	}
 	s3cfmap := s3conf.(map[string]string)
-	ctx.ResponseWriter().Header().Set("Content-Disposition", "attachment; filename=s3cmd.conf")
+	ctx.ResponseWriter().Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+
 	s3c := "[default]\n"
 
 	for k, v := range s3cfmap {
@@ -70,7 +74,6 @@ func (auth AuthHandler) getInboxConfig(ctx iris.Context, authType string) {
 
 // getMain returns the index.html page
 func (auth AuthHandler) getMain(ctx iris.Context) {
-
 	ctx.ViewData("infoUrl", auth.Config.InfoURL)
 	ctx.ViewData("infoText", auth.Config.InfoText)
 	err := ctx.View("index.html")
@@ -83,7 +86,6 @@ func (auth AuthHandler) getMain(ctx iris.Context) {
 
 // getLoginOptions returns the available login providers as JSON
 func (auth AuthHandler) getLoginOptions(ctx iris.Context) {
-
 	var response []LoginOption
 	// Only add the OIDC option if it has both id and secret
 	if auth.Config.OIDC.ID != "" && auth.Config.OIDC.Secret != "" {
@@ -104,7 +106,6 @@ func (auth AuthHandler) getLoginOptions(ctx iris.Context) {
 
 // postEGA handles post requests for logging in using EGA
 func (auth AuthHandler) postEGA(ctx iris.Context) {
-
 	s := sessions.Get(ctx)
 
 	userform := ctx.FormValues()
@@ -114,24 +115,23 @@ func (auth AuthHandler) postEGA(ctx iris.Context) {
 	res, err := authenticateWithCEGA(auth.Config.Cega, username)
 
 	if err != nil {
-		log.Error(err)
+		log.Errorf("No response from cega, error: %v", err)
+		res = &http.Response{
+			Body:       io.NopCloser(nil),
+			StatusCode: http.StatusInternalServerError,
+		}
 	}
-
 	defer res.Body.Close()
 
 	switch res.StatusCode {
 	case 200:
-		if err != nil {
-			log.Error(err)
-
-			return
-		}
-
 		var ur CegaUserResponse
-		err = json.NewDecoder(res.Body).Decode(&ur)
+		err := json.NewDecoder(res.Body).Decode(&ur)
 
 		if err != nil {
-			log.Error("Failed to parse response: ", err)
+			log.Error("Failed to parse cega response: ", err)
+			s.SetFlash("message", "Problems connecting to EGA authentication server")
+			ctx.Redirect("/ega/login", iris.StatusSeeOther)
 
 			return
 		}
@@ -142,7 +142,7 @@ func (auth AuthHandler) postEGA(ctx iris.Context) {
 
 		if ok {
 			log.WithFields(log.Fields{"authType": "cega", "user": username}).Info("Valid password entered by user")
-			claims := map[string]interface{}{
+			claims := map[string]any{
 				jwt.ExpirationKey: time.Now().UTC().Add(time.Duration(auth.Config.JwtTTL) * time.Hour),
 				jwt.IssuedAtKey:   time.Now().UTC(),
 				jwt.IssuerKey:     auth.Config.JwtIssuer,
@@ -151,34 +151,47 @@ func (auth AuthHandler) postEGA(ctx iris.Context) {
 			token, expDate, err := generateJwtToken(claims, auth.Config.JwtPrivateKey, auth.Config.JwtSignatureAlg)
 			if err != nil {
 				log.Errorf("error when generating token: %v", err)
+				s.SetFlash("message", "Unexpected error, please try again.")
+				ctx.Redirect("/ega/login", iris.StatusSeeOther)
+
+				return
 			}
 
 			s3conf := getS3ConfigMap(token, auth.Config.S3Inbox, username)
 			s.SetFlash("ega", s3conf)
+
 			ctx.ViewData("infoUrl", auth.Config.InfoURL)
 			ctx.ViewData("infoText", auth.Config.InfoText)
 			ctx.ViewData("User", username)
 			ctx.ViewData("Token", token)
 			ctx.ViewData("ExpDate", expDate)
-
 			err = ctx.View("ega.html")
+
 			if err != nil {
-				log.Error("Failed to parse response: ", err)
+				log.Error("Failed to create view: ", err)
 
-				return
+				// Since the context has already started writing the response to
+				// the client, the resulting page will be ugly, but at least
+				// show an error message, and an oppertunity to log in again.
+				ctx.ViewData("Reason", "Unexpected error, please try again.")
+				err = ctx.View("loginform.html")
+				log.Error("Failed to create backup view: ", err)
 			}
-
 		} else {
 			log.WithFields(log.Fields{"authType": "cega", "user": username}).Error("Invalid password entered by user")
 			s.SetFlash("message", "Provided credentials are not valid")
 			ctx.Redirect("/ega/login", iris.StatusSeeOther)
 		}
 
-	case 404:
+	case 500, 502, 503:
 		log.WithFields(log.Fields{"authType": "cega", "user": username}).Error("Failed to authenticate user")
 		s.SetFlash("message", "EGA authentication server could not be contacted")
 		ctx.Redirect("/ega/login", iris.StatusSeeOther)
 
+	case 401:
+		log.WithFields(log.Fields{"authType": "cega", "user": username}).Error("Failed to authenticate service (auth_cega_id/secret)")
+		s.SetFlash("message", "Problems connecting to EGA authentication server")
+		ctx.Redirect("/ega/login", iris.StatusSeeOther)
 	default:
 		log.WithFields(log.Fields{"authType": "cega", "user": username}).Error("Failed to authenticate user")
 		s.SetFlash("message", "Provided credentials are not valid")
@@ -188,34 +201,22 @@ func (auth AuthHandler) postEGA(ctx iris.Context) {
 
 // getEGALogin returns the EGA login form
 func (auth AuthHandler) getEGALogin(ctx iris.Context) {
-
 	s := sessions.Get(ctx)
-	message := s.GetFlashString("message")
-	if message == "" {
-		ctx.ViewData("infoUrl", auth.Config.InfoURL)
-		ctx.ViewData("infoText", auth.Config.InfoText)
-		err := ctx.View("loginform.html")
-		if err != nil {
-			log.Error("Failed to return to login form: ", err)
-
-			return
-		}
-
-		return
-	}
 	ctx.ViewData("infoUrl", auth.Config.InfoURL)
 	ctx.ViewData("infoText", auth.Config.InfoText)
-	err := ctx.View("loginform.html", EGALoginError{Reason: message})
+	message := s.GetFlashString("message")
+	if message != "" {
+		ctx.ViewData("Reason", message)
+	}
+	err := ctx.View("loginform.html")
 	if err != nil {
 		log.Error("Failed to view invalid credentials form: ", err)
-
-		return
 	}
 }
 
 // getEGAConf returns an s3config file for an oidc login
 func (auth AuthHandler) getEGAConf(ctx iris.Context) {
-	auth.getInboxConfig(ctx, "ega")
+	auth.getS3Config(ctx, "ega", "s3cmd-inbox.conf")
 }
 
 // getOIDC redirects to the oidc page defined in auth.Config
@@ -264,48 +265,54 @@ func (auth AuthHandler) elixirLogin(ctx iris.Context) *OIDCData {
 
 		return nil
 	}
-	err = auth.Config.DB.UpdateUserInfo(idStruct.User, idStruct.Profile, idStruct.Email, idStruct.EdupersonEntitlement)
+	err = auth.Config.DB.UpdateUserInfo(idStruct.User, idStruct.Fullname, idStruct.Email, idStruct.EdupersonEntitlement)
 	if err != nil {
 		log.Warn("Could not log user info.")
 	}
 
 	if auth.Config.ResignJwt {
-		claims := map[string]interface{}{
+		log.Debugf("Resigning token for user %s", idStruct.User)
+		claims := map[string]any{
 			jwt.ExpirationKey: time.Now().UTC().Add(time.Duration(auth.Config.JwtTTL) * time.Hour),
 			jwt.IssuedAtKey:   time.Now().UTC(),
 			jwt.IssuerKey:     auth.Config.JwtIssuer,
-			jwt.SubjectKey:    idStruct.Profile,
+			jwt.SubjectKey:    idStruct.User,
 		}
 		token, expDate, err := generateJwtToken(claims, auth.Config.JwtPrivateKey, auth.Config.JwtSignatureAlg)
 		if err != nil {
 			log.Errorf("error when generating token: %v", err)
 		}
-		idStruct.Token = token
-		idStruct.ExpDate = expDate
+		idStruct.ResignedToken = token
+		idStruct.ExpDateResigned = expDate
 	}
 
 	log.WithFields(log.Fields{"authType": "oidc", "user": idStruct.User}).Infof("User was authenticated")
-	s3conf := getS3ConfigMap(idStruct.Token, auth.Config.S3Inbox, idStruct.User)
+	s3confInbox := getS3ConfigMap(idStruct.ResignedToken, auth.Config.S3Inbox, idStruct.User)
+	s3confDownload := getS3ConfigMap(idStruct.RawToken, auth.Config.S3Inbox, idStruct.User)
 
-	return &OIDCData{S3Conf: s3conf, OIDCID: idStruct}
+	return &OIDCData{S3ConfInbox: s3confInbox, S3ConfDownload: s3confDownload, OIDCID: idStruct}
 }
 
 // getOIDCLogin renders the `oidc.html` template to the given iris context
 func (auth AuthHandler) getOIDCLogin(ctx iris.Context) {
-
 	oidcData := auth.elixirLogin(ctx)
 	if oidcData == nil {
 		return
 	}
 
 	s := sessions.Get(ctx)
-	s.SetFlash("oidc", oidcData.S3Conf)
+	s.SetFlash("oidcInbox", oidcData.S3ConfInbox)
+	s.SetFlash("oidcDownload", oidcData.S3ConfDownload)
+	ctx.ViewData("cegaID", auth.Config.Cega.ID)
 	ctx.ViewData("infoUrl", auth.Config.InfoURL)
 	ctx.ViewData("infoText", auth.Config.InfoText)
 	ctx.ViewData("User", oidcData.OIDCID.User)
+	ctx.ViewData("Fullname", oidcData.OIDCID.Fullname)
 	ctx.ViewData("Passport", oidcData.OIDCID.Passport)
-	ctx.ViewData("Token", oidcData.OIDCID.Token)
-	ctx.ViewData("ExpDate", oidcData.OIDCID.ExpDate)
+	ctx.ViewData("RawToken", oidcData.OIDCID.RawToken)
+	ctx.ViewData("ResignedToken", oidcData.OIDCID.ResignedToken)
+	ctx.ViewData("ExpDateRaw", oidcData.OIDCID.ExpDateRaw)
+	ctx.ViewData("ExpDateResigned", oidcData.OIDCID.ExpDateResigned)
 
 	err := ctx.View("oidc.html")
 	if err != nil {
@@ -317,7 +324,6 @@ func (auth AuthHandler) getOIDCLogin(ctx iris.Context) {
 
 // getOIDCCORSLogin returns the oidc data as JSON to the given iris context
 func (auth AuthHandler) getOIDCCORSLogin(ctx iris.Context) {
-
 	oidcData := auth.elixirLogin(ctx)
 	if oidcData == nil {
 		return
@@ -331,21 +337,24 @@ func (auth AuthHandler) getOIDCCORSLogin(ctx iris.Context) {
 	}
 }
 
-// getOIDCConf returns an s3config file for an oidc login
-func (auth AuthHandler) getOIDCConf(ctx iris.Context) {
-	auth.getInboxConfig(ctx, "oidc")
+// getOIDCConfInbox returns an s3config file for uploading to the Inbox
+func (auth AuthHandler) getOIDCConfInbox(ctx iris.Context) {
+	auth.getS3Config(ctx, "oidcInbox", "s3cmd-inbox.conf")
+}
+
+// getOIDCConfDownload returns an s3config file for downloading from the Archive
+func (auth AuthHandler) getOIDCConfDownload(ctx iris.Context) {
+	auth.getS3Config(ctx, "oidcDownload", "s3cmd-download.conf")
 }
 
 // globalHeaders presets common response headers
 func globalHeaders(ctx iris.Context) {
-
 	ctx.ResponseWriter().Header().Set("X-Content-Type-Options", "nosniff")
 	ctx.Next()
 }
 
 // addCSPheaders implements CSP and recommended complementary policies
 func addCSPheaders(ctx iris.Context) {
-
 	ctx.ResponseWriter().Header().Set("Content-Security-Policy", "default-src 'self';"+
 		"script-src-elem 'self';"+
 		"img-src 'self' data:;"+
@@ -358,9 +367,8 @@ func addCSPheaders(ctx iris.Context) {
 }
 
 func main() {
-
 	// Initialise config
-	config, err := config.NewConfig("auth")
+	conf, err := config.NewConfig("auth")
 	if err != nil {
 		log.Errorf("Failed to generate config, reason: %v", err)
 		os.Exit(1)
@@ -369,14 +377,14 @@ func main() {
 	var oauth2Config oauth2.Config
 	var provider *oidc.Provider
 
-	if config.Auth.OIDC.ID != "" && config.Auth.OIDC.Secret != "" {
+	if conf.Auth.OIDC.ID != "" && conf.Auth.OIDC.Secret != "" {
 		// Initialise OIDC client
-		oauth2Config, provider = getOidcClient(config.Auth.OIDC)
+		oauth2Config, provider = getOidcClient(conf.Auth.OIDC)
 	}
 
 	// Create handler struct for the web server
 	authHandler := AuthHandler{
-		Config:       config.Auth,
+		Config:       conf.Auth,
 		OAuth2Config: oauth2Config,
 		OIDCProvider: provider,
 		htmlDir:      "./frontend/templates",
@@ -390,12 +398,12 @@ func main() {
 	// Start sessions handler in order to send flash messages
 	sess := sessions.New(sessions.Config{Cookie: "_session_id", AllowReclaim: true})
 
-	if config.Server.CORS.AllowOrigin != "" {
+	if conf.Server.CORS.AllowOrigin != "" {
 		// Set CORS context
 		corsContext := cors.New(cors.Options{
-			AllowedOrigins:   strings.Split(config.Server.CORS.AllowOrigin, ","),
-			AllowedMethods:   strings.Split(config.Server.CORS.AllowMethods, ","),
-			AllowCredentials: config.Server.CORS.AllowCredentials,
+			AllowedOrigins:   strings.Split(conf.Server.CORS.AllowOrigin, ","),
+			AllowedMethods:   strings.Split(conf.Server.CORS.AllowMethods, ","),
+			AllowCredentials: conf.Server.CORS.AllowCredentials,
 		})
 		app.Use(corsContext)
 	}
@@ -403,7 +411,7 @@ func main() {
 	app.Use(sess.Handler())
 
 	// Connect to DB
-	authHandler.Config.DB, err = database.NewSDAdb(config.Database)
+	authHandler.Config.DB, err = database.NewSDAdb(conf.Database)
 	if err != nil {
 		log.Error(err)
 		panic(err)
@@ -427,7 +435,8 @@ func main() {
 
 	// OIDC endpoints
 	app.Get("/oidc", authHandler.getOIDC)
-	app.Get("/oidc/s3conf", authHandler.getOIDCConf)
+	app.Get("/oidc/s3conf-inbox", authHandler.getOIDCConfInbox)
+	app.Get("/oidc/s3conf-download", authHandler.getOIDCConfDownload)
 	app.Get("/oidc/login", authHandler.getOIDCLogin)
 	app.Get("/oidc/cors_login", authHandler.getOIDCCORSLogin)
 
@@ -441,12 +450,10 @@ func main() {
 
 	app.UseGlobal(globalHeaders)
 
-	if config.Server.Cert != "" && config.Server.Key != "" {
-
+	if conf.Server.Cert != "" && conf.Server.Key != "" {
 		log.Infoln("Serving content using https")
-		err = app.Run(iris.TLS("0.0.0.0:8080", config.Server.Cert, config.Server.Key))
+		err = app.Run(iris.TLS("0.0.0.0:8080", conf.Server.Cert, conf.Server.Key))
 	} else {
-
 		log.Infoln("Serving content using http")
 		server := &http.Server{
 			Addr:              "0.0.0.0:8080",

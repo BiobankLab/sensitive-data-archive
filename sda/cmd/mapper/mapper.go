@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/neicnordic/sensitive-data-archive/internal/broker"
@@ -159,7 +160,7 @@ func main() {
 
 // schemaFromDatasetOperation returns the operation done with dataset supplied in body of the message
 func schemaFromDatasetOperation(body []byte) (string, error) {
-	message := make(map[string]interface{})
+	message := make(map[string]any)
 	err := json.Unmarshal(body, &message)
 	if err != nil {
 		return "", err
@@ -167,12 +168,12 @@ func schemaFromDatasetOperation(body []byte) (string, error) {
 
 	datasetMessageType, ok := message["type"]
 	if !ok {
-		return "", fmt.Errorf("malformed message, dataset message type is missing")
+		return "", errors.New("malformed message, dataset message type is missing")
 	}
 
 	datasetOpsType, ok := datasetMessageType.(string)
 	if !ok {
-		return "", fmt.Errorf("could not cast operation attribute to string")
+		return "", errors.New("could not cast operation attribute to string")
 	}
 
 	switch datasetOpsType {
@@ -183,7 +184,6 @@ func schemaFromDatasetOperation(body []byte) (string, error) {
 	case "deprecate":
 		return "dataset-deprecate", nil
 	default:
-		return "", fmt.Errorf("could not recognize mapping operation")
+		return "", errors.New("could not recognize mapping operation")
 	}
-
 }
