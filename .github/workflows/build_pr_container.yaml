@@ -228,8 +228,8 @@ jobs:
           context: ./sda-doa
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}-doa
-            ghcr.io/${{ github.repository }}:PR${{ github.event.number }}-doa
+            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-doa
+            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:PR${{ github.event.number }}-doa
           labels: |
             org.opencontainers.image.source=${{ github.event.repository.clone_url }}
             org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
@@ -241,7 +241,7 @@ jobs:
           TRIVY_SKIP_DB_UPDATE: true
           TRIVY_SKIP_JAVA_DB_UPDATE: true
         with:
-          image-ref: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}-doa
+          image-ref: ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-doa
           format: "sarif"
           hide-progress: true
           ignore-unfixed: true
