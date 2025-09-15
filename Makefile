@@ -1,7 +1,3 @@
-# linter modules to be included/excluded
-LINT_INCLUDE=-E bodyclose,gocritic,gofmt,gosec,govet,nestif,nlreturn,revive,rowserrcheck
-LINT_EXCLUDE=-e G401,G501,G107
-
 help:
 	@echo 'Welcome!'
 	@echo ''
@@ -36,6 +32,8 @@ build-sda-sftp-inbox:
 	@cd sda-sftp-inbox && docker build -t ghcr.io/neicnordic/sensitive-data-archive:PR$$(date +%F)-sftp-inbox .
 build-sda-admin:
 	@cd sda-admin && go build
+build-sda-doa:
+	@cd sda-doa && docker build -t ghcr.io/neicnordic/sensitive-data-archive:PR$$(date +%F)-doa .
 
 
 go-version-check: SHELL:=/bin/bash
@@ -128,17 +126,35 @@ integrationtest-sda-sync-run:
 integrationtest-sda-sync-down:
 	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-sync-integration.yml down -v --remove-orphans
 
+integrationtest-sda-doa-posix: build-all
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-doa-posix-outbox.yml run integration_test
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-doa-posix-outbox.yml down -v --remove-orphans
+integrationtest-sda-doa-posix-run:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-doa-posix-outbox.yml run integration_test
+integrationtest-sda-doa-posix-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-doa-posix-outbox.yml down -v --remove-orphans
+
+integrationtest-sda-doa-s3: build-all
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-doa-s3-outbox.yml run integration_test
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-doa-s3-outbox.yml down -v --remove-orphans
+integrationtest-sda-doa-s3-run:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-doa-s3-outbox.yml run integration_test
+integrationtest-sda-doa-s3-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-doa-s3-outbox.yml down -v --remove-orphans
+
+
+
 # lint go code
 lint-all: lint-sda lint-sda-download lint-sda-admin
 lint-sda:
 	@echo 'Running golangci-lint in the `sda` folder'
-	@cd sda && golangci-lint run $(LINT_INCLUDE) $(LINT_EXCLUDE)
+	@cd sda && golangci-lint run
 lint-sda-download:
 	@echo 'Running golangci-lint in the `sda-download` folder'
-	@cd sda-download && golangci-lint run $(LINT_INCLUDE) $(LINT_EXCLUDE)
+	@cd sda-download && golangci-lint run
 lint-sda-admin:
 	@echo 'Running golangci-lint in the `sda-admin` folder'
-	@cd sda-admin && golangci-lint run $(LINT_INCLUDE) $(LINT_EXCLUDE)
+	@cd sda-admin && golangci-lint run
 
 # run static code tests
 test-all: test-sda test-sda-download test-sda-sftp-inbox
@@ -170,7 +186,8 @@ k3d-version-check:
 		echo "kubectl is missing";\
 	fi
 k3d-create-cluster:
-	@k3d cluster create
+	@k3d cluster create --k3s-arg "--disable=traefik@server:0" --port "80:80@loadbalancer" --port "443:443@loadbalancer"; \
+	helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx --namespace ingress-nginx --create-namespace
 k3d-delete-cluster:
 	@k3d cluster delete
 k3d-deploy-dependencies:

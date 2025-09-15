@@ -72,7 +72,7 @@ func main() {
 	}
 }
 
-func setup(config *config.Config) *http.Server {
+func setup(conf *config.Config) *http.Server {
 	r := mux.NewRouter().SkipClean(true)
 
 	r.HandleFunc("/ready", readinessResponse).Methods("GET")
@@ -82,7 +82,7 @@ func setup(config *config.Config) *http.Server {
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 
 	srv := &http.Server{
-		Addr:              config.API.Host + ":" + fmt.Sprint(config.API.Port),
+		Addr:              conf.API.Host + ":" + fmt.Sprint(conf.API.Port),
 		Handler:           r,
 		TLSConfig:         cfg,
 		TLSNextProto:      make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
@@ -137,13 +137,16 @@ func dataset(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	if err := schema.ValidateJSON(fmt.Sprintf("%s/../bigpicture/file-sync.json", Conf.Broker.SchemasPath), b); err != nil {
-		respondWithError(w, http.StatusBadRequest, fmt.Sprintf("eror on JSON validation: %s", err.Error()))
+		respondWithError(w, http.StatusBadRequest, fmt.Sprintf("error on JSON validation: %s", err.Error()))
 
 		return
 	}
 
 	if err := parseDatasetMessage(b); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		log.Errorf("error on parsing dataset message: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "error while processing message")
+
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -210,7 +213,7 @@ func respondWithError(w http.ResponseWriter, code int, message string) {
 	respondWithJSON(w, code, map[string]string{"error": message})
 }
 
-func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+func respondWithJSON(w http.ResponseWriter, code int, payload any) {
 	log.Infoln(payload)
 	response, _ := json.Marshal(payload)
 

@@ -95,6 +95,14 @@ This will build all required images, bring up the services, run the integration 
     ```sh
     make integrationtest-sda-sync
     ```
+- Integration test for SDA-DOA using POSIX as the storage backend:
+    ```sh
+    make integrationtest-sda-doa-posix
+    ```
+- Integration test for SDA-DOA using S3 as the storage backend:
+    ```sh
+    make integrationtest-sda-doa-s3
+    ```
 #### Running the integration tests without shutting down the services 
 This will run the integration tests and keep the services running after the tests are finished.
 
@@ -110,7 +118,14 @@ This will run the integration tests and keep the services running after the test
     ```sh
     make integrationtest-sda-sync-run
     ```
-
+- Integration test for SDA-DOA using POSIX as the storage backend:
+    ```sh
+    make integrationtest-sda-doa-posix-run
+    ```
+- Integration test for SDA-DOA using S3 as the storage backend:
+    ```sh
+    make integrationtest-sda-doa-s3-run
+    ```
 After that, you will need to shut down the services manually.
 
 - Shut down services for SDA using POSIX as the storage backend
@@ -124,6 +139,14 @@ After that, you will need to shut down the services manually.
 - Shut down services for SDA including the sync service:
     ```sh
     make integrationtest-sda-sync-down
+    ```
+- Shut down services for SDA-DOA using POSIX as the storage backend
+    ```sh
+    make integrationtest-sda-doa-posix-down
+    ```
+- Shut down services for SDA-DOA using S3 as the storage backend
+    ```sh
+    make integrationtest-sda-doa-s3-down
     ```
 
 ### Linting the Go code
@@ -176,26 +199,6 @@ wget -q -O - https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
 curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
 ```
 
-Once installed a cluster named `test-cluster` can be created as such:
-
-```sh
-k3d cluster create test-cluster
-```
-
-Or by using the `make k3d-create-cluster` command, you can create a cluster named `k3s-default`.
-
-The new cluster's connection details will automatically be merged into your default kubeconfig and activated. The command below should show the created node.
-
-```sh
-kubectl get nodes
-```
-
-Removing the cluster can be done using the `make k3d-delete-cluster` command or as shown below if a specific name is used during creation.
-
-```sh
-k3d cluster delete test-cluster
-```
-
 #### Install kubectl
 
 If `kubectl` is not installed, run the following command to download the latest stable version. (substitue `linux/amd64` with `darwin/arm64` if you are using a Mac).
@@ -203,6 +206,27 @@ If `kubectl` is not installed, run the following command to download the latest 
 ```sh
 curl -sLO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
 ```
+
+#### Create a cluster
+
+Once installed a cluster can be created using the `make k3d-create-cluster` command, you can create a cluster named `k3s-default`.
+The new cluster's connection details will automatically be merged into your default kubeconfig and activated. The command below should show the created node.
+
+```sh
+kubectl get nodes
+```
+
+The Nginx ingress controller is deployed and will bind to ports 80 and 443 of the host system. A deployed service with an ingress definition can then be targeted by setting the `Host: HOSTNAME` header for that service.
+
+```sh
+curl -H "Host: test" http://localhost/
+```
+
+For testing ingress endpoints with other applications like a web browser, the hostname in the ingress definition should have the `.127.0.0.1.nip.io` ending in order to not have to modify the `/etc/hosts` file, ex. `app.127.0.0.1.nip.io`.
+
+#### Remove the cluster
+
+Removing the cluster can be done using the `make k3d-delete-cluster` command or as shown below if a specific name is used during creation.
 
 ### Deploy the components
 
@@ -220,37 +244,28 @@ Deployment of the charts can be done as describe below in more detail, or by usi
 
 #### Bootstrap the dependencies
 
-This script requires [yq](https://github.com/mikefarah/yq/releases/latest) and the GO version of [crypt4gh](https://github.com/neicnordic/crypt4gh/releases/latest)
+This script requires [yq](https://github.com/mikefarah/yq/releases/latest), the GO version of [crypt4gh](https://github.com/neicnordic/crypt4gh/releases/latest) as well as [xxd](https://manpages.org/xxd) and [jq](https://manpages.org/jq) to be installed.
 
-```sh
-bash .github/integration/scripts/charts/dependencies.sh local
-```
+Bootstrap the dependencies with the command: `make k3d-deploy-dependencies`.
 
 #### Deploy the Sensitive Data Archive components
 
-Start by building the required containers using the `make build-all` command, once that has completed the images can be imported to the cluster.
+Start by building and importing the required containers using the `make k3d-import-images`.
 
-```sh
-bash .github/integration/scripts/charts/import_local_images.sh <CLUTER_NAME>
-```
+The Postgres and RabbitMQ Needs to be deployed first using the following commands: `make k3d-deploy-postgres` and `make k3d-deploy-rabbitmq`.
 
-The Postgres and RabbitMQ Needs to be deployed first, the bool at the end specifies if TLS should be enabled or not for the deployes services.  
-Replace `sda-db` in the example below with the helmc hart that shuld be installed. (`sda-db` or `sda-mq`)
+Once the DB and MQ are installed the SDA stack can be installed, here the desired storage backend needs to specified as well (`posix` or `s3`), `make k3d-deploy-sda-posix` or `make k3d-deploy-sda-s3`.
 
-```sh
-bash .github/integration/scripts/charts/deploy_charts.sh sda-db "$(date +%F)" false
-```
+#### Testing with ingress
 
-Once the DB and MQ are installed the SDA stack can be installed, here the desired storage backend needs to specified as well (`posix` or `s3`)
+Once everything is deployed it is posible to interact with the services using the following hostnames:
 
-```sh
-bash .github/integration/scripts/charts/deploy_charts.sh sda-svc "$(date +%F)" false s3
-```
+- api.127.0.0.1.nip.io
+- auth.127.0.0.1.nip.io
+- broker.127.0.0.1.nip.io
+- download.127.0.0.1.nip.io
+- inbox.127.0.0.1.nip.io
 
 #### Cleanup all deployed components
 
-Once the testing is concluded all deployed components can be removed.
-
-```sh
-bash .github/integration/scripts/charts/cleanup.sh
-```
+Once the testing is concluded all deployed components can be removed with the command `make k3d-cleanup-all-deployments`
