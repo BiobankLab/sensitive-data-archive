@@ -15,7 +15,7 @@ services:
     build:
       context: ../../postgresql
     container_name: postgres
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}-postgres
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}-postgres
     depends_on:
       certfixer:
         condition: service_completed_successfully
@@ -53,7 +53,7 @@ services:
   rabbitmq:
     build:
       context: ../../rabbitmq
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}-rabbitmq
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}-rabbitmq
     container_name: rabbitmq
     depends_on:
       certfixer:
@@ -113,7 +113,7 @@ services:
     container_name: doa
     build:
       context: ../../sda-doa
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}-doa
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}-doa
     depends_on:
       postgres:
         condition: service_healthy

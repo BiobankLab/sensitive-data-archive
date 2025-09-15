@@ -37,7 +37,7 @@ services:
       - shared:/shared
 
   reencrypt:
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}
     command: [ sda-reencrypt ]
     container_name: reencrypt
     depends_on:
