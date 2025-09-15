@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -22,14 +24,19 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/neicnordic/crypt4gh/keys"
+	"github.com/neicnordic/crypt4gh/model/headers"
 	"github.com/neicnordic/sensitive-data-archive/internal/broker"
 	"github.com/neicnordic/sensitive-data-archive/internal/config"
 	"github.com/neicnordic/sensitive-data-archive/internal/database"
+	"github.com/neicnordic/sensitive-data-archive/internal/helper"
 	"github.com/neicnordic/sensitive-data-archive/internal/jsonadapter"
+	"github.com/neicnordic/sensitive-data-archive/internal/reencrypt"
 	"github.com/neicnordic/sensitive-data-archive/internal/schema"
 	"github.com/neicnordic/sensitive-data-archive/internal/storage"
 	"github.com/neicnordic/sensitive-data-archive/internal/userauth"
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type dataset struct {
@@ -39,9 +46,10 @@ type dataset struct {
 }
 
 var (
-	Conf *config.Config
-	err  error
-	auth *userauth.ValidateFromToken
+	Conf        *config.Config
+	err         error
+	auth        *userauth.ValidateFromToken
+	auditLogger *log.Logger
 )
 
 func main() {
@@ -94,7 +102,39 @@ func setup(conf *config.Config) *http.Server {
 		log.Fatalf("error when setting up RBAC enforcer, reason %s", err.Error()) // nolint # FIXME Fatal should only be called from main
 	}
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
+
+	// Enable default Gin logger in debug mode for detailed request logging during development
+	if log.GetLevel() == log.DebugLevel {
+		r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+			SkipPaths: []string{"/ready"},
+		}))
+	}
+
+	// Enable structured JSON logging in info mode for clean, parseable logs in production
+	if log.GetLevel() == log.InfoLevel {
+		r.Use(gin.LoggerWithConfig(
+			gin.LoggerConfig{
+				Formatter: func(params gin.LogFormatterParams) string {
+					s, _ := json.Marshal(map[string]any{
+						"level":       "info",
+						"method":      params.Method,
+						"path":        params.Path,
+						"remote_addr": params.ClientIP,
+						"status_code": params.StatusCode,
+						"time":        params.TimeStamp.Format(time.RFC3339),
+					})
+
+					return string(s) + "\n"
+				},
+
+				Output:    gin.DefaultWriter,
+				SkipPaths: []string{"/ready"},
+			},
+		))
+	}
+
 	r.GET("/ready", readinessResponse)
 	r.GET("/files", rbac(e), getFiles)
 	r.GET("/datasets", rbac(e), listDatasets)
@@ -104,16 +144,18 @@ func setup(conf *config.Config) *http.Server {
 	r.POST("/c4gh-keys/deprecate/*keyHash", rbac(e), deprecateC4ghHash) // Deprecate a given key hash
 	r.DELETE("/file/:username/:fileid", rbac(e), deleteFile)            // Delete a file from inbox
 	// submission endpoints below here
-	r.POST("/file/ingest", rbac(e), ingestFile)                  // start ingestion of a file
-	r.POST("/file/accession", rbac(e), setAccession)             // assign accession ID to a file
-	r.PUT("/file/verify/:accession", rbac(e), reVerifyFile)      // trigger reverification of a file
-	r.POST("/dataset/create", rbac(e), createDataset)            // maps a set of files to a dataset
-	r.POST("/dataset/release/*dataset", rbac(e), releaseDataset) // Releases a dataset to be accessible
-	r.PUT("/dataset/verify/*dataset", rbac(e), reVerifyDataset)  // Re-verify all files in the dataset
-	r.GET("/datasets/list", rbac(e), listAllDatasets)            // Lists all datasets with their status
-	r.GET("/datasets/list/:username", rbac(e), listUserDatasets) // Lists datasets with their status for a specififc user
-	r.GET("/users", rbac(e), listActiveUsers)                    // Lists all users
-	r.GET("/users/:username/files", rbac(e), listUserFiles)      // Lists all unmapped files for a user
+	r.POST("/file/ingest", rbac(e), ingestFile)                   // start ingestion of a file
+	r.POST("/file/accession", rbac(e), setAccession)              // assign accession ID to a file
+	r.PUT("/file/verify/:accession", rbac(e), reVerifyFile)       // trigger reverification of a file
+	r.POST("/dataset/create", rbac(e), createDataset)             // maps a set of files to a dataset
+	r.POST("/dataset/release/*dataset", rbac(e), releaseDataset)  // Releases a dataset to be accessible
+	r.PUT("/dataset/verify/*dataset", rbac(e), reVerifyDataset)   // Re-verify all files in the dataset
+	r.GET("/datasets/list", rbac(e), listAllDatasets)             // Lists all datasets with their status
+	r.GET("/datasets/list/:username", rbac(e), listUserDatasets)  // Lists datasets with their status for a specific user
+	r.GET("/users", rbac(e), listActiveUsers)                     // Lists all users
+	r.GET("/users/:username/files", rbac(e), listUserFiles)       // Lists all unmapped files for a user
+	r.GET("/users/:username/file/:fileid", rbac(e), downloadFile) // Download a file from a users inbox
+
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 
 	srv := &http.Server{
@@ -194,27 +236,58 @@ func checkDB(db *database.SDAdb, timeout time.Duration) error {
 	return db.DB.PingContext(ctx)
 }
 
+func auditLog(auditFields log.Fields) {
+	auditFields["audit"] = true
+	Conf.API.AuditLogger.WithFields(auditFields).Info("Incoming audit event")
+}
+
 func rbac(e *casbin.Enforcer) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, err := auth.Authenticate(c.Request)
 		if err != nil {
-			log.Debugln("bad token")
+			if Conf.API.AuditLogger != nil {
+				auditLog(log.Fields{
+					"authentication error": err.Error(),
+					"path":                 c.Request.URL.Path,
+				})
+			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 
 			return
 		}
 
-		ok, err := e.Enforce(token.Subject(), c.Request.URL.String(), c.Request.Method)
+		ok, err := e.Enforce(token.Subject(), c.Request.URL.Path, c.Request.Method)
 		if err != nil {
+			if Conf.API.AuditLogger != nil {
+				auditLog(log.Fields{
+					"authorization": "error (err.Error())",
+					"user":          token.Subject(),
+					"path":          c.Request.URL.Path,
+				})
+			}
 			log.Debugf("rbac enforcement failed, reason: %s\n", err.Error())
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 
 			return
 		}
 		if !ok {
+			if Conf.API.AuditLogger != nil {
+				auditLog(log.Fields{
+					"authorization": "failed",
+					"user":          token.Subject(),
+					"path":          c.Request.URL.Path,
+				})
+			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "not authorized"})
 
 			return
+		}
+
+		if Conf.API.AuditLogger != nil {
+			auditLog(log.Fields{
+				"user": token.Subject(),
+				"path": c.Request.URL.Path,
+			})
 		}
 		log.Debugln("authorized")
 	}
@@ -232,7 +305,7 @@ func getFiles(c *gin.Context) {
 		return
 	}
 
-	files, err := Conf.API.DB.GetUserFiles(token.Subject(), false)
+	files, err := Conf.API.DB.GetUserFiles(token.Subject(), c.Query("path_prefix"), false)
 	if err != nil {
 		// something went wrong with querying or parsing rows
 		c.JSON(502, err.Error())
@@ -319,8 +392,8 @@ func deleteFile(c *gin.Context) {
 		return
 	}
 
-	var retryTimes = 5
-	for count := 1; count <= retryTimes; count++ {
+	filePath = helper.UnanonymizeFilepath(filePath, submissionUser)
+	for count := 1; count <= 5; count++ {
 		err = inbox.RemoveFile(filePath)
 		if err == nil {
 			break
@@ -337,6 +410,123 @@ func deleteFile(c *gin.Context) {
 	if err := Conf.API.DB.UpdateFileEventLog(fileID, "disabled", fileID, "api", "{}", "{}"); err != nil {
 		log.Errorf("set status deleted failed, reason: (%v)", err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
+
+		return
+	}
+
+	c.Status(http.StatusOK)
+}
+
+// reencryptHeader re-encrypts the header of a file using the public key
+// provided in the request header and returns the new header. The function uses
+// gRPC to communicate with the re-encrypt service and handles TLS configuration
+// if needed. The function also handles the case where the CA certificate is
+// provided for secure communication.
+func reencryptHeader(oldHeader []byte, c4ghPubKey string) ([]byte, error) {
+	var opts []grpc.DialOption
+	switch {
+	case Conf.API.Grpc.ClientCreds != nil:
+		opts = append(opts, grpc.WithTransportCredentials(Conf.API.Grpc.ClientCreds))
+	default:
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	conn, err := grpc.NewClient(fmt.Sprintf("%s:%d", Conf.API.Grpc.Host, Conf.API.Grpc.Port), opts...)
+	if err != nil {
+		log.Errorf("failed to connect to the reencrypt service, reason: %s", err)
+
+		return nil, err
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(Conf.API.Grpc.Timeout)*time.Second)
+	defer cancel()
+
+	c := reencrypt.NewReencryptClient(conn)
+	res, err := c.ReencryptHeader(ctx, &reencrypt.ReencryptRequest{Oldheader: oldHeader, Publickey: c4ghPubKey})
+	if err != nil {
+		return nil, err
+	}
+
+	return res.Header, nil
+}
+
+// The downloadFile function download a file re-encrypted with the public key
+// provided in the request header from the inbox. It retrieves the file path
+// from the database using the file ID and user ID.
+func downloadFile(c *gin.Context) {
+	// Get the public key from the request header.
+	c4ghPubKey := c.GetHeader("C4GH-Public-Key")
+
+	pubKey, err := base64.StdEncoding.DecodeString(c4ghPubKey)
+	if err != nil || len(pubKey) == 0 {
+		log.Errorf("bad public key, error: %v", err)
+		c.AbortWithStatusJSON(http.StatusBadRequest, "bad public key")
+
+		return
+	}
+
+	inbox, err := storage.NewBackend(Conf.Inbox)
+	if err != nil {
+		log.Errorf("failed to initialize inbox backend, reason: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, "storage backend error")
+
+		return
+	}
+
+	// Retrieve the actual file path for the user's file.
+	fileID := strings.TrimPrefix(c.Param("fileid"), "/")
+	filePath, err := Conf.API.DB.GetInboxFilePathFromID(
+		strings.TrimPrefix(c.Param("username"), "/"),
+		fileID,
+	)
+	if err != nil {
+		log.Errorf("getting file path from fileID (%s) failed, reason: %v", fileID, err)
+		c.AbortWithStatusJSON(http.StatusNotFound, "failed to retrieve inbox file path")
+
+		return
+	}
+
+	// Get inbox file handle #noqa
+	file, err := inbox.NewFileReader(
+		helper.UnanonymizeFilepath(
+			filePath,
+			strings.TrimPrefix(c.Param("username"), "/"),
+		),
+	)
+	if err != nil {
+		log.Errorf("inbox file %s not found or failed to read, %s", filePath, err.Error())
+		c.AbortWithStatusJSON(http.StatusInternalServerError, "failed to read inbox file")
+
+		return
+	}
+
+	// get the header of the crypt4gh file
+	header, err := headers.ReadHeader(file)
+	if err != nil {
+		log.Errorf("failed to read header for fileID %s, reason: %v", fileID, err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, "failed to read the start of the file")
+
+		return
+	}
+
+	newHeader, err := reencryptHeader(header, c4ghPubKey)
+	if err != nil {
+		log.Errorf("failed to reencrypt header, reason: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, "failed to reencrypt header")
+
+		return
+	}
+
+	// Set the headers for the response.
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", path.Base(filePath)))
+
+	reader := io.MultiReader(bytes.NewReader(newHeader), file)
+	_, err = io.Copy(c.Writer, reader)
+	if err != nil {
+		log.Errorf("error occurred while sending stream, reason: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, "failed to stream data to client")
 
 		return
 	}
@@ -413,7 +603,7 @@ func createDataset(c *gin.Context) {
 	}
 
 	if len(dataset.AccessionIDs) == 0 {
-		c.AbortWithStatusJSON(http.StatusBadRequest, "at least one accessionID is reqired")
+		c.AbortWithStatusJSON(http.StatusBadRequest, "at least one accessionID is required")
 
 		return
 	}
@@ -542,7 +732,8 @@ func listUserFiles(c *gin.Context) {
 	username = strings.TrimPrefix(username, "/")
 	username = strings.TrimSuffix(username, "/files")
 	log.Debugln(username)
-	files, err := Conf.API.DB.GetUserFiles(username, true)
+
+	files, err := Conf.API.DB.GetUserFiles(username, c.Query("path_prefix"), true)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
 

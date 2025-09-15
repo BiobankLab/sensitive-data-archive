@@ -9,7 +9,7 @@ global:
 # Path where the sensitive files can be found, default is "/.secrets".
 # TLS certificates or C4GH key locations can be set using global.tlsPath or global.c4ghPath respectively,
 # this path will be a subpath to the secretsPath.
-  secretsPath: /.secrets
+  secretsPath: "/.secrets"
   c4ghPath: "c4gh"
   tlsPath: "tls"
   jwtPath: "jwt"
@@ -188,15 +188,22 @@ global:
     password: ""
 
   c4gh:
-    secretName: ""
-  # name of the c4gh key file.
-    keyFile: ""
-  # name of the public file, required for testing
-    publicFile: ""
-    passphrase: ""
-    backupPubKey: ""
-
+    secretName:
+    publicKey:
+    publicKeyData:
+    privateKeys:
+    - keyName:
+      passphrase:
+      keyData:
+    syncPubKey:
+    syncPubKeyData:
   db:
+    admin:
+  # These credentials need at least dbOwner permissions
+  # in order to perform schema migrations.
+      secretName: ""
+      passKey: ""
+      userKey: ""
     host: ""
     name: "sda"
     user: ""
@@ -366,6 +373,21 @@ credentials:
 api:
   name: api
   replicaCount: 2
+  livenessProbe:
+    # httpGet:
+    #   port: api
+    #   path: /ready
+    #   scheme: "HTTPS"
+    # initialDelaySeconds: 20
+    # periodSeconds: 60
+    # timeoutSeconds: 30
+  readinessProbe:
+    httpGet:
+      port: api
+      path: /ready
+      scheme: "HTTPS"
+    periodSeconds: 10
+    timeoutSeconds: 9
   resources:
     requests:
       memory: "128Mi"
@@ -383,6 +405,22 @@ api:
 auth:
   name: auth
   replicaCount: 2
+  livenessProbe:
+    # httpGet:
+    #   port: auth
+    #   path: /
+    #   scheme: "HTTPS"
+    #   httpHeaders:
+    # initialDelaySeconds: 20
+    # periodSeconds: 60
+    # timeoutSeconds: 30
+  readinessProbe:
+    httpGet:
+      port: auth
+      path: /
+      scheme: "HTTPS"
+    periodSeconds: 10
+    timeoutSeconds: 9
   resources:
     requests:
       memory: "128Mi"
@@ -399,10 +437,17 @@ auth:
 
 doa:
   name: doa
-  repository: ghcr.io/neicnordic/sda-doa
-  imageTag: v1.6.62
   imagePullPolicy: IfNotPresent
   replicaCount: 2
+  livenessProbe:
+    # tcpSocket:
+    #   port: doa
+    # initialDelaySeconds: 120
+    # periodSeconds: 30
+  readinessProbe:
+    tcpSocket:
+      port: doa
+    periodSeconds: 15
   resources:
     requests:
       memory: "256Mi"
@@ -423,6 +468,21 @@ doa:
 download:
   name: download
   replicaCount: 2
+  livenessProbe:
+    # httpGet:
+    #   path: /health
+    #   port: download
+    #   scheme: "HTTPS"
+    # initialDelaySeconds: 20
+    # periodSeconds: 60
+    # timeoutSeconds: 30
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: download
+      scheme: "HTTPS"
+    periodSeconds: 10
+    timeoutSeconds: 9
   resources:
     requests:
       memory: "256Mi"
@@ -472,7 +532,6 @@ ingest:
     secretName: ""
 
 intercept:
-  deploy: true
   name: ingest
   replicaCount: 1
   resources:
@@ -507,6 +566,12 @@ mapper:
 
 reencrypt:
   replicaCount: 1
+  readinessProbe:
+    periodSeconds: 10
+    timeoutSeconds: 2
+    grpc:
+      port: 50443
+      service: "reencrypt.Reencrypt"
   resources:
     requests:
       memory: "128Mi"
@@ -524,6 +589,22 @@ reencrypt:
 s3Inbox:
   name: s3Inbox
   replicaCount: 2
+  livenessProbe:
+    # httpGet:
+    #   path: /health
+    #   port: inbox
+    #   scheme: "HTTPS"
+    # failureThreshold: 1
+    # periodSeconds: 60
+    # timeoutSeconds: 55
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: inbox
+      scheme: "HTTPS"
+    failureThreshold: 1
+    periodSeconds: 10
+    timeoutSeconds: 9
   resources:
     requests:
       memory: "128Mi"
@@ -541,6 +622,22 @@ s3Inbox:
 sftpInbox:
   name: sftpInbox
   replicaCount: 2
+  livenessProbe:
+    # exec:
+    #   command:
+    #   - /bin/sh
+    #   - -c
+    #   - netstat -an | grep -q ':2222 '
+    # initialDelaySeconds: 120
+    # periodSeconds: 30
+    # timeoutSeconds: 25
+  readinessProbe:
+    exec:
+      command:
+      - /bin/sh
+      - -c
+      - netstat -an | grep -q ':2222 '
+    periodSeconds: 5
   resources:
     requests:
       memory: "128Mi"
@@ -577,6 +674,10 @@ sync:
 syncapi:
   name: sync-api
   replicaCount: 1
+  readinessProbe:
+    tcpSocket:
+      port: syncapi
+    periodSeconds: 5
   resources:
     requests:
       memory: "64Mi"
@@ -604,7 +705,6 @@ releasetest:
 verify:
   replicaCount: 1
   repository: ghcr.io/biobanklab/sda-pipeline
-  imageTag: v0.4.27
   imagePullPolicy: IfNotPresent
   resources:
     requests:
@@ -619,3 +719,9 @@ verify:
   annotations: {}
   tls:
     secretName: ""
+
+jobs:
+  image: postgres:15.4-alpine
+  removeUserName: false
+  setKeyHash: false
+  upgradeFromV1: false

@@ -4,7 +4,6 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/smtp"
 	"strconv"
@@ -72,7 +71,7 @@ func main() {
 				log.Errorf("Failed to send email, error %v", err)
 
 				if e := d.Nack(false, false); e != nil {
-					log.Errorf("Failed to Nack message (corr-id: %s, errror: %v) ", d.CorrelationId, e)
+					log.Errorf("Failed to Nack message, error: %v) ", e)
 				}
 
 				continue
@@ -156,7 +155,7 @@ func validator(queue, schemaPath string, delivery amqp091.Delivery) error {
 		}
 
 		return nil
+	default:
+		return fmt.Errorf("unknown queue, %s", queue)
 	}
-
-	return errors.New("Error")
 }

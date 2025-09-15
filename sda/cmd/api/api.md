@@ -19,6 +19,12 @@ Endpoints:
   [{"inboxPath":"requester_demo.org/data/file1.c4gh","fileStatus":"uploaded","createAt":"2023-11-13T10:12:43.144242Z"}] 
   ```
 
+    It is possible to limit the returned results by supplying a base path prefix in the query. In this case only files that have a path that starts with `submission-1` will be returned.
+
+    ```bash
+    curl -H "Authorization: Bearer $token" -X GET https://HOSTNAME/files?path_prefix=submission-1
+    ```
+
   If the `token` is invalid, 401 is returned.
 
 - `/datasets`
@@ -215,10 +221,34 @@ Admin endpoints are only available to a set of whitelisted users specified in th
     curl -H "Authorization: Bearer $token" -X GET  https://HOSTNAME/users/submitter@example.org/files
     ```
 
+    It is possible to limit the returned results by supplying a base path prefix in the query. In this case only files that have a path that starts with `submission-1` will be returned.
+
+      ```bash
+    curl -H "Authorization: Bearer $token" -X GET https://HOSTNAME/users/submitter@example.org/files?path_prefix=submission-1
+    ```
+
   - Error codes
     - `200` Query execute ok.
     - `401` Token user is not in the list of admins.
     - `500` Internal error due to DB failure.
+
+- `/users/:username/file/:fileid`
+  - accepts `GET` requests.
+  - downloads a file from the inbox, re-encrypted with the client’s public key provided in the request header.
+  - the public key provided in the header should be `base64` encoded.
+
+  - Error codes
+    - `200` Query execute ok.
+    - `400` Client public key not provided or not valid.
+    - `401` Token user is not in the list of admins.
+    - `404` File not found
+    - `500` Internal error due to Inbox, Reencrypt, DB, MQ or streaming failures.
+
+    Example:
+
+    ```bash
+    curl -H "Authorization: Bearer $token" -H "C4GH-Public-Key: $base64_encoded_public_key" -X GET  https://HOSTNAME/users/submitter@example.org/file/c2acecc6-f208-441c-877a-2670e4cbb040
+    ```
 
 - `/c4gh-keys/add`
   - accepts `POST` requests with the hex hash of the key and its description
