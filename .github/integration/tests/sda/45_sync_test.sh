@@ -17,7 +17,7 @@ for file in NA12878.bai NA12878_20k_b37.bai; do
             echo "::error::Time out while waiting for files to be synced"
             exit 1
         fi
-        sleep 2
+        sleep 4
     done
 done
 
