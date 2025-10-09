@@ -10,6 +10,24 @@ Source repositories:
 Edit the values.yaml file and specify the relevant parts of the `global` section.
 If no shared credentials for the broker and database are used, the credentials for each service shuld be set in the `credentials` section.
 
+While it is possible to deploy this chart with the crypt4gh keys included in the values file as base64 encoded strings, it is advisable to create the secret containing the crypt4gh keys manually.
+
+## Upgrading an existing Release to a new version
+
+A major chart version change (like v1.2.3 -> v2.0.0) indicates that there is an incompatible breaking change needing manual actions.
+
+### To 3.0.0
+
+This version adds jobs that perform the following actions:
+
+- Migrates the database schema from a V1 release.
+- Sets the first registered crypt4gh key to all ingested files that do not have a c4gh key referenced.
+- Removes the submitters username from the submission file paths in the database.
+
+When upgrading from a V1 release *All these jobs* should be run.
+
+Unless the same queries are being executed manually by a database administrator a `Basic authentication Secret` containing the credentials to perform the upgrade needs to be created.
+
 ### Configuration
 
 The following table lists the configurable parameters of the `sda-svc` chart and their default values.
@@ -17,7 +35,7 @@ The following table lists the configurable parameters of the `sda-svc` chart and
 Parameter | Description | Default
 --------- | ----------- | -------
 `image.repository` | Repository URI | `ghcr.io/neicnordic/sensitive-data-archive`
-`image.tag` | Tag version to deploy | ``
+`image.tag` | Tag version to deploy | `chart appVersion`
 `image.pullPolicy` | Image pull policy, `Always` or `IfNotPresent` | `Always`
 `global.secretsPath` | Path where the sensitive files can be found | `/.secrets`
 `global.c4ghPath` | This path will be a subpath to the secretsPath | `c4gh`
@@ -99,9 +117,15 @@ Parameter | Description | Default
 `global.cega.host` | Full URI to the EGA user authentication service. |`""`
 `global.cega.user` | Username for the EGA user authentication service. |`""`
 `global.cega.password` | Password for the EGA user authentication service. |`""`
-`global.c4gh.keyFile` | Private C4GH key. |`c4gh.key`
-`global.c4gh.passphrase` | Passphrase for the private C4GH key. |`""`
-`global.c4gh.publicFile` | Public key corresponding to the private key, provided in /info endpoint. |`""`
+`global.c4gh.privateKeys` | List of Private C4GH keys. |``
+`global.c4gh.privateKeys.0.keyData` | The private crypt4gh key provided as a base64 encoded string. |`""`
+`global.c4gh.privateKeys.0.keyName` | Filename of the private C4GH key. |`""`
+`global.c4gh.privateKeys.0.passphrase` | Passphrase for the private C4GH key. |`""`
+`global.c4gh.publicKey` | Public key corresponding to the private key, provided in /info endpoint. |`""`
+`global.c4gh.publicKeyData` | Public key corresponding to the private key, provided as a base64 encoded string. |`""`
+`global.db.admin.secretName` | Name of the secret that holds the database admin credentials. |`""`
+`global.db.admin.passKey` | Key in the secret that holds the password. |`""`
+`global.db.admin.userkey` | Key in the secret that holds the username. |`""`
 `global.db.host` | Hostname for the database. |`""`
 `global.db.name` | Database to connect to. |`lega`
 `global.db.passIngest` | Password used for `data in` services. |`""`
@@ -153,7 +177,7 @@ Parameter | Description | Default
 `global.inbox.s3ReadyPath` | Endpoint to verify that the inbox is respondig. |`""`
 `global.sync.api.password` | Password for authenticating to the syncAPI server | `null`
 `global.sync.api.user` | User for authenticating to the syncAPI server | `null`
-`global.sync.brokerQueue` | Queue to read messages from | `sync`
+`global.sync.brokerQueue` | Queue to read messages from | `mapping_stream`
 `global.sync.centerPrefix` | Prefix for locally generated datasets | `null`
 `global.sync.destination.storageType` | Storage type for the sync destination, currently only supports S3 | `s3`
 `global.sync.destination.accesskey` | Access key to S3 sync destination | `null`
@@ -168,6 +192,8 @@ Parameter | Description | Default
 `global.tls.enabled` | Use TLS for all connections. |`true`
 `global.tls.issuer` | Issuer for TLS certificate creation. |`""`
 `global.tls.clusterIssuer` | ClusterIssuer for TLS certificate creation. |`""`
+`global.reencrypt.host` | gRPC host for reencryption |`""`
+`global.reencrypt.port` | port number of the gRPC host for reencryption |`"50051"`
 
 ### Credentials
 
@@ -218,6 +244,8 @@ Parameter | Description | Default
 --------- | ----------- | -------
 `api.replicaCount` | Desired number of replicas | `2`
 `api.annotations` | Specific annotation for the auth pod | `{}`
+`api.livenessProbe` | Liveness definition for the api pod. |`{}`
+`api.readinessProbe` | Rediness definition for the api pod. |`{}`
 `api.resources.requests.memory` | Memory request for container. |`128Mi`
 `api.resources.requests.cpu` | CPU request for container. |`100m`
 `api.resources.limits.memory` | Memory limit for container. |`256Mi`
@@ -225,21 +253,17 @@ Parameter | Description | Default
 `api.tls.secretName` | Secret holding the application TLS certificates |``
 `auth.replicaCount` | desired number of replicas | `2`
 `auth.annotations` | Specific annotation for the auth pod | `{}`
+`auth.livenessProbe` | Liveness definition for the auth pod. |`{}`
+`auth.readinessProbe` | Rediness definition for the auth pod. |`{}`
 `auth.resources.requests.memory` | Memory request for container. |`128Mi`
 `auth.resources.requests.cpu` | CPU request for container. |`100m`
 `auth.resources.limits.memory` | Memory limit for container. |`256Mi`
 `auth.resources.limits.cpu` | CPU limit for container. |`250m`
-`sync.annotations` | Specific annotation for the sync pod | `{}`
-`sync.resources.requests.memory` | Memory request for sync container. |`128Mi`
-`sync.resources.requests.cpu` | CPU request for sync container. |`100m`
-`sync.resources.limits.memory` | Memory limit for sync container. |`256Mi`
-`sync.resources.limits.cpu` | CPU limit for sync container. |`250m`
-`sync.deploy` | Set to true if the sync service should be active | `false`
 `doa.replicaCount` | desired number of replicas | `2`
-`doa.repository` | dataedge container image repository | `neicnordic/sda-doa`
-`doa.imageTag` | dataedge container image version | `"latest"`
 `doa.keystorePass` | keystore password | `changeit`
 `doa.annotations` | Specific annotation for the doa pod | `{}`
+`doa.livenessProbe` | Liveness definition for the doa pod. |`{}`
+`doa.readinessProbe` | Rediness definition for the doa pod. |`{}`
 `doa.resources.requests.memory` | Memory request for dataedge container. |`128Mi`
 `doa.resources.requests.cpu` | CPU request for dataedge container. |`100m`
 `doa.resources.limits.memory` | Memory limit for dataedge container. |`1024Mi`
@@ -247,6 +271,8 @@ Parameter | Description | Default
 `download.replicaCount` | desired number of replicas | `2`
 `download.keystorePass` | keystore password | `changeit`
 `download.annotations` | Specific annotation for the dataedge pod | `{}`
+`download.livenessProbe` | Liveness definition for the download pod. |`{}`
+`download.readinessProbe` | Rediness definition for the download pod. |`{}`
 `download.resources.requests.memory` | Memory request for dataedge container. |`256Mi`
 `download.resources.requests.cpu` | CPU request for dataedge container. |`100m`
 `download.resources.limits.memory` | Memory limit for dataedge container. |`512Mi`
@@ -264,13 +290,14 @@ Parameter | Description | Default
 `ingest.resources.limits.cpu` | CPU limit for ingest container. |`2000m`
 `intercept.replicaCount` | desired number of intercept workers | `1`
 `intercept.annotations` | Specific annotation for the intercept pod | `{}`
-`intercept.deploy` | Set to false in a non federated deployment | `true`
 `intercept.resources.requests.memory` | Memory request for intercept container. |`32Mi`
 `intercept.resources.requests.cpu` | CPU request for intercept container. |`100m`
 `intercept.resources.limits.memory` | Memory limit for intercept container. |`128Mi`
 `intercept.resources.limits.cpu` | CPU limit for intercept container. |`2000m`
 `s3Inbox.replicaCount`| desired number of S3inbox containers | `2`
 `s3Inbox.annotations` | Specific annotation for the S3inbox pod | `{}`
+`s3Inbox.livenessProbe` | Liveness definition for the s3Inbox pod. |`{}`
+`s3Inbox.readinessProbe` | Rediness definition for the S3inbox pod. |`{}`
 `s3Inbox.resources.requests.memory` | Memory request for s3Inbox container. |`128Mi`
 `s3Inbox.resources.requests.cpu` | CPU request for s3Inbox container. |`100m`
 `s3Inbox.resources.limits.memory` | Memory limit for s3Inbox container. |`1024Mi`
@@ -279,18 +306,22 @@ Parameter | Description | Default
 `sftpInbox.keystorePass` | sftp inbox keystore password | `changeit`
 `sftpInbox.nodeHostname` | Node name if the sftp inbox  needs to be deployed on a specific node | `""`
 `sftpInbox.annotations` | Specific annotation for the sftp inbox pod | `{}`
+`sftpInbox.livenessProbe` | Liveness definition for the sftpInbox pod. |`{}`
+`sftpInbox.readinessProbe` | Rediness definition for the sftpInbox pod. |`{}`
 `sftpInbox.resources.requests.memory` | Memory request for sftpInbox container. |`128Mi`
 `sftpInbox.resources.requests.cpu` | CPU request for sftpInbox container. |`100m`
 `sftpInbox.resources.limits.memory` | Memory limit for sftpInbox container. |`256Mi`
 `sftpInbox.resources.limits.cpu` | CPU limit for sftpInbox container. |`250m`
-`sync.replicaCount`| desired number of sync containers | `1`
 `sync.annotations` | Specific annotation for the sync pod | `{}`
+`sync.deploy` | Set to true if the sync service should be active | `false`
+`sync.replicaCount`| desired number of sync containers | `1`
 `sync.resources.requests.memory` | Memory request for sync container. |`128Mi`
 `sync.resources.requests.cpu` | CPU request for sync container. |`100m`
 `sync.resources.limits.memory` | Memory limit for sync container. |`512Mi`
 `sync.resources.limits.cpu` | CPU limit for sync container. |`500m`
 `syncAPI.replicaCount`| desired number of syncAPI containers | `1`
 `syncAPI.annotations` | Specific annotation for the syncAPI pod | `{}`
+`syncAPI.readinessProbe` | Rediness definition for the syncAPI pod. |`{}`
 `syncAPI.resources.requests.memory` | Memory request for syncAPI container. |`64Mi`
 `syncAPI.resources.requests.cpu` | CPU request for syncAPI container. |`100m`
 `syncAPI.resources.limits.memory` | Memory limit for syncAPI container. |`256Mi`
@@ -304,3 +335,9 @@ Parameter | Description | Default
 `releasetest.repository` | inbox container image repository | `neicnordic/sda-helm-test-support`
 `releasetest.imageTag` | inbox container image version | `latest`
 `releasetest.imagePullPolicy` | inbox container image pull policy | `Always`
+
+### Jobs
+
+`jobs.image` | Container image used for running the DB migration jobs | `postgres:15.4-alpine`
+`jobs.setKeyHash` | Populate the key_hash table after migration from V1 | `false`
+`jobs.upgradeFromV1` | Upgrade database schema from a version 1 release. | `false`

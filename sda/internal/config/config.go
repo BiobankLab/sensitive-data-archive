@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
+	"google.golang.org/grpc/credentials"
 )
 
 const (
@@ -51,9 +52,22 @@ type Config struct {
 	Auth         AuthConf
 }
 
+type Grpc struct {
+	CACert      string
+	ClientCert  string
+	ClientKey   string
+	ClientCreds credentials.TransportCredentials
+	ServerCert  string
+	ServerKey   string
+	Host        string
+	Port        int
+	Timeout     int
+}
+
 type ReEncConfig struct {
-	APIConf
-	Crypt4GHKey *[32]byte
+	Grpc
+	C4ghPrivateKeyList []*[32]byte
+	Timeout            int
 }
 
 type Sync struct {
@@ -74,16 +88,18 @@ type SyncAPIConf struct {
 }
 
 type APIConf struct {
-	RBACpolicy []byte
-	CACert     string
-	ServerCert string
-	ServerKey  string
-	Host       string
-	Port       int
-	Session    SessionConfig
-	DB         *database.SDAdb
-	MQ         *broker.AMQPBroker
-	INBOX      storage.Backend
+	RBACpolicy  []byte
+	CACert      string
+	ServerCert  string
+	ServerKey   string
+	Host        string
+	Port        int
+	Session     SessionConfig
+	DB          *database.SDAdb
+	MQ          *broker.AMQPBroker
+	INBOX       storage.Backend
+	Grpc        Grpc
+	AuditLogger *log.Logger
 }
 
 type SessionConfig struct {
@@ -168,7 +184,7 @@ func NewConfig(app string) (*Config, error) {
 
 	if viper.IsSet("configPath") {
 		cp := viper.GetString("configPath")
-		log.Infof("configPath: %s", cp)
+		log.Debugf("configPath: %s", cp)
 		if !strings.HasSuffix(cp, "/") {
 			cp += "/"
 		}
@@ -177,21 +193,21 @@ func NewConfig(app string) (*Config, error) {
 	if viper.IsSet("configFile") {
 		viper.SetConfigFile(viper.GetString("configFile"))
 	}
-	log.Infoln("reading config")
+	log.Debugf("Attempting to read configuration...")
 	if err := viper.ReadInConfig(); err != nil {
-		log.Infoln(err.Error())
+		log.Debugf("Error reading config : %v", err)
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			log.Infoln("ReadInConfig Error")
+			log.Warnf("ReadInConfig Error : %v", err)
 
 			return nil, err
 		}
-		log.Infoln("No config file found, using ENVs only")
+		log.Debugf("No config file found, using ENVs only")
 	}
 
 	if viper.IsSet("log.format") {
 		if viper.GetString("log.format") == "json" {
 			log.SetFormatter(&log.JSONFormatter{})
-			log.Info("The logs format is set to JSON")
+			log.Debugf("The logs format is set to JSON")
 		}
 	}
 
@@ -199,7 +215,7 @@ func NewConfig(app string) (*Config, error) {
 		stringLevel := viper.GetString("log.level")
 		intLevel, err := log.ParseLevel(stringLevel)
 		if err != nil {
-			log.Infof("Log level '%s' not supported, setting to 'trace'", stringLevel)
+			log.Debugf("Log level '%s' not supported, setting to 'trace'", stringLevel)
 			intLevel = log.TraceLevel
 		}
 		log.SetLevel(intLevel)
@@ -219,6 +235,7 @@ func NewConfig(app string) (*Config, error) {
 			"db.user",
 			"db.password",
 			"db.database",
+			"grpc.host",
 		}
 		switch viper.GetString("inbox.type") {
 		case S3:
@@ -303,6 +320,8 @@ func NewConfig(app string) (*Config, error) {
 			requiredConfVars = append(requiredConfVars, []string{"archive.url", "archive.accesskey", "archive.secretkey", "archive.bucket"}...)
 		case POSIX:
 			requiredConfVars = append(requiredConfVars, []string{"archive.location"}...)
+		default:
+			log.Warnln(" archive not configured, backup will not be performed.")
 		}
 
 		switch viper.GetString("backup.type") {
@@ -310,6 +329,8 @@ func NewConfig(app string) (*Config, error) {
 			requiredConfVars = append(requiredConfVars, []string{"backup.url", "backup.accesskey", "backup.secretkey", "backup.bucket"}...)
 		case POSIX:
 			requiredConfVars = append(requiredConfVars, []string{"backup.location"}...)
+		default:
+			log.Warnln(" backup destination not configured, backup will not be performed.")
 		}
 	case "intercept":
 		requiredConfVars = []string{
@@ -339,6 +360,8 @@ func NewConfig(app string) (*Config, error) {
 			requiredConfVars = append(requiredConfVars, []string{"inbox.url", "inbox.accesskey", "inbox.secretkey", "inbox.bucket"}...)
 		case POSIX:
 			requiredConfVars = append(requiredConfVars, []string{"inbox.location"}...)
+		default:
+			return nil, errors.New("inbox.type not set")
 		}
 	case "notify":
 		requiredConfVars = []string{
@@ -364,8 +387,7 @@ func NewConfig(app string) (*Config, error) {
 		}
 	case "reencrypt":
 		requiredConfVars = []string{
-			"c4gh.filepath",
-			"c4gh.passphrase",
+			"c4gh.privateKeys",
 		}
 	case "s3inbox":
 		requiredConfVars = []string{
@@ -493,6 +515,11 @@ func NewConfig(app string) (*Config, error) {
 			return nil, err
 		}
 		c.configSchemas()
+
+		c.API.Grpc, err = configReEncryptClient()
+		if err != nil {
+			return nil, err
+		}
 	case "auth":
 		c.Auth.Cega.AuthURL = viper.GetString("auth.cega.authUrl")
 		c.Auth.Cega.ID = viper.GetString("auth.cega.id")
@@ -650,7 +677,9 @@ func NewConfig(app string) (*Config, error) {
 		}
 
 		c.configArchive()
-		c.configSync()
+		if err := c.configSync(); err != nil {
+			return nil, err
+		}
 		c.configSchemas()
 	case "sync-api":
 		if err := c.configBroker(); err != nil {
@@ -677,12 +706,13 @@ func NewConfig(app string) (*Config, error) {
 		}
 
 		c.configSchemas()
+	default:
+		return nil, errors.New("unknown app name")
 	}
 
 	return c, nil
 }
 
-// configDatabase provides configuration for the database
 func (c *Config) configAPI() error {
 	c.apiDefaults()
 	api := APIConf{}
@@ -698,6 +728,12 @@ func (c *Config) configAPI() error {
 	api.ServerKey = viper.GetString("api.serverKey")
 	api.ServerCert = viper.GetString("api.serverCert")
 	api.CACert = viper.GetString("api.CACert")
+	if viper.GetBool("api.audit") {
+		api.AuditLogger = log.New()
+		api.AuditLogger.SetFormatter(&log.JSONFormatter{})
+		api.AuditLogger.SetOutput(os.Stdout)
+		api.AuditLogger.SetLevel(log.InfoLevel)
+	}
 
 	c.API = api
 
@@ -712,6 +748,7 @@ func (c *Config) apiDefaults() {
 	viper.SetDefault("api.session.secure", true)
 	viper.SetDefault("api.session.httponly", true)
 	viper.SetDefault("api.session.name", "api_session_key")
+	viper.SetDefault("api.audit", true)
 }
 
 // configArchive provides configuration for the archive storage
@@ -900,10 +937,65 @@ func (c *Config) configOrchestrator() {
 	}
 }
 
-func (c *Config) configReEncryptServer() (err error) {
-	if viper.IsSet("grpc.host") {
-		c.ReEncrypt.Host = viper.GetString("grpc.host")
+func configReEncryptClient() (Grpc, error) {
+	var grpc Grpc
+	grpc.Host = viper.GetString("grpc.host")
+	grpc.Port = 50051
+	if viper.IsSet("grpc.port") {
+		grpc.Port = viper.GetInt("grpc.port")
 	}
+
+	grpc.Timeout = 30
+	if viper.IsSet("grpc.timeout") {
+		grpc.Timeout = viper.GetInt("grpc.timeout")
+	}
+
+	if viper.IsSet("grpc.clientcert") && viper.IsSet("grpc.clientkey") {
+		grpc.Port = 50443
+		switch {
+		case viper.IsSet("grpc.cacert"):
+			cacertByte, err := os.ReadFile(viper.GetString("grpc.cacert"))
+			if err != nil {
+				return Grpc{}, fmt.Errorf("failed to read CA certificate file, reason: %s", err.Error())
+			}
+
+			caCert := x509.NewCertPool()
+			if !caCert.AppendCertsFromPEM(cacertByte) {
+				return Grpc{}, errors.New("failed to append CA certificate to cert pool")
+			}
+
+			certs, err := tls.LoadX509KeyPair(viper.GetString("grpc.clientcert"), viper.GetString("grpc.clientkey"))
+			if err != nil {
+				return Grpc{}, errors.New("Failed to load client key pair for reencrypt")
+			}
+
+			grpc.ClientCreds = credentials.NewTLS(
+				&tls.Config{
+					Certificates: []tls.Certificate{certs},
+					MinVersion:   tls.VersionTLS13,
+					RootCAs:      caCert,
+				},
+			)
+		default:
+			certs, err := tls.LoadX509KeyPair(viper.GetString("grpc.clientcert"), viper.GetString("grpc.clientkey"))
+			if err != nil {
+				return Grpc{}, errors.New("Failed to load client key pair for reencrypt")
+			}
+
+			grpc.ClientCreds = credentials.NewTLS(
+				&tls.Config{
+					Certificates: []tls.Certificate{certs},
+					MinVersion:   tls.VersionTLS13,
+				},
+			)
+		}
+	}
+
+	return grpc, nil
+}
+
+func (c *Config) configReEncryptServer() (err error) {
+	c.ReEncrypt.Port = 50051
 	if viper.IsSet("grpc.port") {
 		c.ReEncrypt.Port = viper.GetInt("grpc.port")
 	}
@@ -921,9 +1013,12 @@ func (c *Config) configReEncryptServer() (err error) {
 		c.ReEncrypt.Port = 50443
 	}
 
-	c.ReEncrypt.Crypt4GHKey, err = GetC4GHKey()
+	c.ReEncrypt.C4ghPrivateKeyList, err = GetC4GHprivateKeys()
 	if err != nil {
 		return err
+	}
+	if len(c.ReEncrypt.C4ghPrivateKeyList) == 0 {
+		return errors.New("no C4GH private keys configured")
 	}
 
 	return nil
@@ -1009,7 +1104,7 @@ func (c *Config) configSMTP() {
 }
 
 // configSync provides configuration for the sync destination storage
-func (c *Config) configSync() {
+func (c *Config) configSync() error {
 	switch viper.GetString("sync.destination.type") {
 	case S3:
 		c.Sync.Destination.Type = S3
@@ -1020,6 +1115,8 @@ func (c *Config) configSync() {
 	case POSIX:
 		c.Sync.Destination.Type = POSIX
 		c.Sync.Destination.Posix.Location = viper.GetString("sync.destination.location")
+	default:
+		return errors.New("sync.destination.type not set")
 	}
 
 	c.Sync.RemoteHost = viper.GetString("sync.remote.host")
@@ -1029,6 +1126,8 @@ func (c *Config) configSync() {
 	c.Sync.RemotePassword = viper.GetString("sync.remote.password")
 	c.Sync.RemoteUser = viper.GetString("sync.remote.user")
 	c.Sync.CenterPrefix = viper.GetString("sync.centerPrefix")
+
+	return nil
 }
 
 // configSync provides configuration for the outgoing sync settings

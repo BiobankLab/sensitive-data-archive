@@ -115,7 +115,7 @@ until [ "$(psql -U postgres -h postgres -d sda -At -c "select event from sda.dat
         echo "::error::Time out while waiting for dataset to be released"
         exit 1
     fi
-    sleep 2
+    sleep 4
 done
 
 echo "dataset released successfully"

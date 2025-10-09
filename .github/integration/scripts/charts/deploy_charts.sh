@@ -7,8 +7,14 @@ if [ -z "$2" ]; then
 fi
 
 MQ_PORT=5672
+PROTOCOL=http
+SCHEME=HTTP
+GRPC_PORT=50051
 if [ "$3" == "true" ]; then
     MQ_PORT=5671
+    PROTOCOL=https
+    SCHEME=HTTPS
+    GRPC_PORT=50444
 fi
 
 dir=".github/integration/scripts/charts"
@@ -42,6 +48,10 @@ if [ "$1" == "sda-mq" ]; then
         --set persistence.enabled=false \
         --set resources=null \
         --wait
+
+    if [ "$4" == "federated" ]; then
+        curl -kL -u "admin:$ADMINPASS" -X PUT "$PROTOCOL://broker.127.0.0.1.nip.io/api/queues/sda/from_cega"
+    fi
 fi
 
 if [ "$1" == "sda-svc" ]; then
@@ -52,6 +62,7 @@ if [ "$1" == "sda-svc" ]; then
         sync_api_user=user
     fi
     helm install pipeline charts/sda-svc \
+        --set global.schemaType="$5" \
         --set image.tag="PR$2" \
         --set image.pullPolicy=IfNotPresent \
         --set global.tls.enabled="$3" \
@@ -62,6 +73,12 @@ if [ "$1" == "sda-svc" ]; then
         --set global.sync.api.password="$sync_api_pass" \
         --set global.sync.api.user="$sync_api_user" \
         --set global.sync.remote.host="$sync_host" \
+        --set api.readinessProbe.httpGet.scheme="$SCHEME" \
+        --set auth.readinessProbe.httpGet.scheme="$SCHEME" \
+        --set download.readinessProbe.httpGet.scheme="$SCHEME" \
+        --set s3Inbox.readinessProbe.httpGet.scheme="$SCHEME" \
+        --set syncAPI.readinessProbe.httpGet.scheme="$SCHEME" \
+        --set reencrypt.readinessProbe.grpc.port="$GRPC_PORT" \
         -f "$dir/values.yaml" \
         --wait
 fi

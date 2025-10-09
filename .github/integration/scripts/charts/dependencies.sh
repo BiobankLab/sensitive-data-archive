@@ -2,7 +2,7 @@
 set -ex
 
 YQ_VERSION="v4.20.1"
-C4GH_VERSION="$(curl --retry 100 -sL https://api.github.com/repos/neicnordic/crypt4gh/releases/latest | jq -r '.name')"
+C4GH_VERSION="v1.14.0"
 
 random-string() {
         head -c 32 /dev/urandom | base64 -w0 | tr -d '/+' | fold -w 32 | head -n 1
@@ -99,13 +99,17 @@ if [ "$1" == "local" ]; then
 fi
 
 ## update values file with all credentials
+if [ "$2" == "federated" ]; then
+        yq -i '.global.schemaType = federated' "$values_file"
+fi
+
 yq -i '
 .global.archive.s3AccessKey = strenv(MINIO_ACCESS) |
 .global.archive.s3SecretKey = strenv(MINIO_SECRET) |
 .global.backupArchive.s3AccessKey = strenv(MINIO_ACCESS) |
 .global.backupArchive.s3SecretKey = strenv(MINIO_SECRET) |
 .global.broker.password = strenv(MQPASSWORD) |
-.global.c4gh.passphrase = strenv(C4GHPASSPHRASE) |
+.global.c4gh.privateKeys[0].passphrase = strenv(C4GHPASSPHRASE) |
 .global.db.password = strenv(PGPASSWORD) |
 .global.inbox.s3AccessKey = strenv(MINIO_ACCESS) |
 .global.inbox.s3SecretKey = strenv(MINIO_SECRET) |
@@ -115,3 +119,17 @@ yq -i '
 ' "$values_file"
 
 kubectl create secret generic api-rbac --from-file=".github/integration/sda/rbac.json"
+
+cat >/tmp/users.json <<EOD
+[
+    {
+        "username": "dummy@example.com",
+        "uid": 1,
+        "passwordHash": "\$2b\$12\$1gyKIjBc9/cT0MYkXX24xe1LjEUjNwgL4rEk8fDoO.vDQZzWkqrn.",
+        "gecos": "dummy user",
+        "sshPublicKey": [],
+        "enabled": null
+    }
+]
+EOD
+kubectl create configmap cega-nss --from-file=".github/integration/sda/users.py" --from-file="/tmp/users.json"

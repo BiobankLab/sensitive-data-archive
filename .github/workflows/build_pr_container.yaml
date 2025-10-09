@@ -31,7 +31,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Log in to the Github Container registry
         uses: docker/login-action@v3
@@ -81,7 +81,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Log in to the Github Container registry
         uses: docker/login-action@v3
@@ -117,7 +117,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Run Trivy vulnerability scanner on postgres
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.33.1
         env:
           TRIVY_SKIP_DB_UPDATE: false
           TRIVY_SKIP_JAVA_DB_UPDATE: false
@@ -135,7 +135,7 @@ jobs:
           category: postgres
 
       - name: Run Trivy vulnerability scanner on rabbitmq
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.33.1
         env:
           TRIVY_SKIP_DB_UPDATE: false
           TRIVY_SKIP_JAVA_DB_UPDATE: false
@@ -167,7 +167,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Log in to the Github Container registry
         uses: docker/login-action@v3
@@ -190,7 +190,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Run Trivy vulnerability scanner on sftp-inbox
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.33.1
         env:
           TRIVY_SKIP_DB_UPDATE: false
           TRIVY_SKIP_JAVA_DB_UPDATE: false
@@ -207,21 +207,6 @@ jobs:
           sarif_file: 'inbox-results.sarif'
           category: sftp-inbox
 
-
-      - name: create maven settings.xml
-        uses: s4u/maven-settings-action@v3.1.0
-        with:
-          servers: |
-            [{
-              "id":"github-fega-norway",
-              "username": "${{github.actor}}",
-              "password": "${{ secrets.GITHUB_TOKEN }}"
-            }]
-
-      - name: Copy settings.xml to sda-doa root
-        shell: bash
-        run: cp /home/runner/.m2/settings.xml ./sda-doa/settings.xml
-
       - name: Build container for sda-doa
         uses: docker/build-push-action@v6
         with:
@@ -236,7 +221,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Run Trivy vulnerability scanner on doa
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.33.1
         env:
           TRIVY_SKIP_DB_UPDATE: true
           TRIVY_SKIP_JAVA_DB_UPDATE: true
@@ -262,7 +247,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Test rabbitmq federation
         run: docker compose -f .github/integration/rabbitmq-federation.yml run federation_test
@@ -280,7 +265,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Test postgres 
         run: docker compose -f .github/integration/postgres.yml run tests
@@ -301,7 +286,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Test sensitive-data-archive
         run: docker compose -f .github/integration/sda-${{matrix.storage}}-integration.yml run integration_test
@@ -312,7 +297,7 @@ jobs:
       - build_server_images
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
         id: changes
         with:
@@ -335,21 +320,7 @@ jobs:
         storage: [s3, posix]
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
-
-      - name: create maven settings.xml
-        uses: s4u/maven-settings-action@v3.1.0
-        with:
-          servers: |
-            [{
-              "id":"github-fega-norway",
-              "username": "${{github.actor}}",
-              "password": "${{ secrets.GITHUB_TOKEN }}"
-            }]
-
-      - name: Copy settings.xml to sda-doa root
-        shell: bash
-        run: cp /home/runner/.m2/settings.xml ./sda-doa/settings.xml
+        uses: actions/checkout@v5
 
       - name: Test sda-doa for ${{ matrix.storage }} storage
         run: docker compose -f .github/integration/sda-doa-${{ matrix.storage }}-outbox.yml run integration_test
@@ -362,14 +333,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        version: ["1.30", "1.31"]
+        deployment: ["federated", "isolated"]
+        version: ["1.32", "1.33"]
         tls: ["true", "false"]
         storage: ["posix", "s3"]
         exclude:
-          - version: "1.30"
+          - version: "1.32"
             tls: "false"
             storage: "posix"
-          - version: "1.31"
+          - version: "1.33"
             tls: "false"
             storage: "posix"
     steps:
@@ -380,7 +352,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Helm
         uses: azure/setup-helm@v4
@@ -395,7 +367,7 @@ jobs:
         shell: bash
 
       - name: Deploy external services
-        run: bash .github/integration/scripts/charts/dependencies.sh
+        run: bash .github/integration/scripts/charts/dependencies.sh ${{matrix.deployment}}
         shell: bash
 
       - name: Deploy DB
@@ -410,7 +382,7 @@ jobs:
 
       - name: Deploy MQ
         id: deployMQ
-        run: bash .github/integration/scripts/charts/deploy_charts.sh sda-mq ${{ github.event.number }} ${{matrix.tls}}
+        run: bash .github/integration/scripts/charts/deploy_charts.sh sda-mq ${{ github.event.number }} ${{matrix.tls}} ${{matrix.deployment}}
         shell: bash
       - name: debug
         if: failure() && steps.deployMQ.outcome == 'failure'
@@ -420,7 +392,7 @@ jobs:
           kubectl logs broker-sda-mq-0
 
       - name: Deploy pipeline
-        run: bash .github/integration/scripts/charts/deploy_charts.sh sda-svc ${{ github.event.number }} ${{matrix.tls}} ${{matrix.storage}}
+        run: bash .github/integration/scripts/charts/deploy_charts.sh sda-svc ${{ github.event.number }} ${{matrix.tls}} ${{matrix.storage}} ${{matrix.deployment}}
         shell: bash
 
       - name: Check deployment
@@ -447,4 +419,10 @@ jobs:
             echo "## logs $svc" && kubectl logs -l role="$svc"
             sleep 1
           done
+          if [ ${{matrix.deployment}} == "federated" ]; then
+            echo "## describe intercept" && kubectl describe pod -l role=intercept
+            sleep 1
+            echo "## logs intercept" && kubectl logs -l role=intercept
+            sleep 1
+          fi
         shell: bash
