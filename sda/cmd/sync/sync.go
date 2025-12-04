@@ -25,7 +25,7 @@ import (
 
 var (
 	err                      error
-	key, publicKey           *[32]byte
+	key                      *[32]byte
 	db                       *database.SDAdb
 	conf                     *config.Config
 	archive, syncDestination storage.Backend
@@ -60,11 +60,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	publicKey, err = config.GetC4GHPublicKey()
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	defer mq.Channel.Close()
 	defer mq.Connection.Close()
 	defer db.Close()
@@ -90,7 +85,7 @@ func main() {
 			log.Fatal(err)
 		}
 		for delivered := range messages {
-			log.Debugf("Received a message (corr-id: %s, message: %s)",
+			log.Debugf("Received a message (correlation-id: %s, message: %s)",
 				delivered.CorrelationId,
 				delivered.Body)
 
@@ -196,7 +191,7 @@ func syncFiles(stableID string) error {
 	}
 
 	pubkeyList := [][chacha20poly1305.KeySize]byte{}
-	pubkeyList = append(pubkeyList, *publicKey)
+	pubkeyList = append(pubkeyList, *conf.Sync.PublicKey)
 	newHeader, err := headers.ReEncryptHeader(header, *key, pubkeyList)
 	if err != nil {
 		return err
