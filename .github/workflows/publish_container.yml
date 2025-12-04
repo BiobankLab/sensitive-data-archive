@@ -122,9 +122,9 @@ jobs:
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7
         with:
-          token: ${{ secrets.GHCR_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: Bump chart version
-          author: neicnordic <neicnordic@users.noreply.github.com>
+          author: 'Biobank Lab'
           base: main
           branch: bump
           delete-branch: true
@@ -133,4 +133,4 @@ jobs:
             Bump the appVersion to: ${{ needs.tag_release.outputs.tag }}
           labels: |
             automated pr
-          team-reviewers: neicnordic/sensitive-data-development-collaboration
+          team-reviewers: 'Biobank Lab/sensitive-data-development-collaboration'
