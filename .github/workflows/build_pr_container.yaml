@@ -31,7 +31,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Log in to the Github Container registry
         uses: docker/login-action@v3
@@ -81,7 +81,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Log in to the Github Container registry
         uses: docker/login-action@v3
@@ -129,7 +129,7 @@ jobs:
           output: 'postgres-results.sarif'
           severity: "CRITICAL,HIGH"
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'postgres-results.sarif'
           category: postgres
@@ -147,7 +147,7 @@ jobs:
           output: 'rabbitmq-results.sarif'
           severity: "CRITICAL,HIGH"
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'rabbitmq-results.sarif'
           category: rabbitmq
@@ -167,7 +167,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Log in to the Github Container registry
         uses: docker/login-action@v3
@@ -202,7 +202,7 @@ jobs:
           output: 'inbox-results.sarif'
           severity: "CRITICAL,HIGH"
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'inbox-results.sarif'
           category: sftp-inbox
@@ -247,7 +247,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Test rabbitmq federation
         run: docker compose -f .github/integration/rabbitmq-federation.yml run federation_test
@@ -265,7 +265,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Test postgres 
         run: docker compose -f .github/integration/postgres.yml run tests
@@ -286,7 +286,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Test sensitive-data-archive
         run: docker compose -f .github/integration/sda-${{matrix.storage}}-integration.yml run integration_test
@@ -297,7 +297,7 @@ jobs:
       - build_server_images
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
         id: changes
         with:
@@ -320,7 +320,7 @@ jobs:
         storage: [s3, posix]
     steps:
       - name: Check out code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Test sda-doa for ${{ matrix.storage }} storage
         run: docker compose -f .github/integration/sda-doa-${{ matrix.storage }}-outbox.yml run integration_test
@@ -352,7 +352,7 @@ jobs:
           string: ${{ github.repository }}
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install Helm
         uses: azure/setup-helm@v4
