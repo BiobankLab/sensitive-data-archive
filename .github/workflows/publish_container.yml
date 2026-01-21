@@ -129,7 +129,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: Bump chart version
-          author: 'Biobank Lab'
+          author: user.email "$GITHUB_ACTOR@users.noreply.github.com"
           base: main
           branch: bump
           delete-branch: true
@@ -138,4 +138,4 @@ jobs:
             Bump the appVersion to: ${{ needs.tag_release.outputs.tag }}
           labels: |
             automated pr
-          team-reviewers: 'Biobank Lab/sensitive-data-development-collaboration'
+          team-reviewers: 'biobanklab/sensitive-data-development-collaboration'

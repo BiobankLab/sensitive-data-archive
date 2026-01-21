@@ -96,7 +96,7 @@ func TestMain(m *testing.M) {
 
 	// pulls an image, creates a container based on it and runs it
 	rabbitmq, err := pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: "ghcr.io/neicnordic/sensitive-data-archive",
+		Repository: "ghcr.io/biobanklab/sensitive-data-archive",
 		Tag:        "v3.0.0-rabbitmq",
 	}, func(config *docker.HostConfig) {
 		// set AutoRemove to true so that stopped container goes away by itself

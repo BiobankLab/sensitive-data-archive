@@ -103,7 +103,7 @@ service:
 updateStrategyType: RollingUpdate
 
 testimage:
-  repository: neicnordic/sda-helm-tests-support
+  repository: biobanklab/sda-helm-tests-support
   tag: latest
   pullPollicy: Always
   tls:

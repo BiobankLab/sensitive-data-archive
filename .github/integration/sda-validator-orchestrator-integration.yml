@@ -62,7 +62,7 @@ services:
       interval: 10s
       timeout: 2s
       retries: 6
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}-postgres
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}-postgres
     extra_hosts:
       - "localhost:host-gateway"
     ports:
@@ -86,7 +86,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}-rabbitmq
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}-rabbitmq
     ports:
       - "15672:15672"
       - "5672:5672"
@@ -178,7 +178,7 @@ services:
     security_opt: # Unconfine seccomp and apparmor to allow apptainer to create usernamespaces within the container
       - seccomp=unconfined
       - apparmor=unconfined
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}-validator-orchestrator
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}-validator-orchestrator
     container_name: validator-orchestrator
     depends_on:
       api:
@@ -223,7 +223,7 @@ services:
         GOLANG_VERSION: ${GOLANG_VERSION:-1.20}
       context: ../../sda
       target: debug
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}
     command: [ sda-s3inbox ]
     container_name: s3inbox
     depends_on:
@@ -274,7 +274,7 @@ services:
       - DB_USER=api
     extra_hosts:
       - "localhost:host-gateway"
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}
     ports:
       - "8090:8080"
     restart: always
@@ -286,7 +286,7 @@ services:
   
   
   reencrypt:
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}
     command: [sda-reencrypt]
     container_name: reencrypt
     depends_on:
