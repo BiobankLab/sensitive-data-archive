@@ -19,7 +19,7 @@ bootstrap: go-version-check docker-version-check
 		go install golang.org/x/tools/cmd/goimports@latest
 
 # build containers
-build-all: build-postgresql build-rabbitmq build-sda build-sda-download build-sda-sftp-inbox build-sda-admin
+build-all: build-postgresql build-rabbitmq build-sda build-sda-download build-sda-sftp-inbox build-sda-admin build-sda-validator-orchestrator
 build-postgresql:
 	@cd postgresql && docker build -t ghcr.io/neicnordic/sensitive-data-archive:PR$$(date +%F)-postgres .
 build-rabbitmq:
@@ -34,6 +34,8 @@ build-sda-admin:
 	@cd sda-admin && go build
 build-sda-doa:
 	@cd sda-doa && docker build -t ghcr.io/neicnordic/sensitive-data-archive:PR$$(date +%F)-doa .
+build-sda-validator-orchestrator:
+	@cd sda-validator/orchestrator && docker build -t ghcr.io/neicnordic/sensitive-data-archive:PR$$(date +%F)-validator-orchestrator .
 
 
 go-version-check: SHELL:=/bin/bash
@@ -147,7 +149,13 @@ integrationtest-sda-doa-s3-run:
 integrationtest-sda-doa-s3-down:
 	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-doa-s3-outbox.yml down -v --remove-orphans
 
-
+integrationtest-sda-validator-orchestrator: build-all
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-validator-orchestrator-integration.yml run integration_test
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-validator-orchestrator-integration.yml down -v --remove-orphans
+integrationtest-sda-validator-orchestrator-run:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-validator-orchestrator-integration.yml run integration_test
+integrationtest-sda-validator-orchestrator-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-validator-orchestrator-integration.yml down -v --remove-orphans
 
 # lint go code
 lint-all: lint-sda lint-sda-download lint-sda-admin
@@ -191,8 +199,9 @@ k3d-version-check:
 		echo "kubectl is missing";\
 	fi
 k3d-create-cluster:
-	@k3d cluster create --k3s-arg "--disable=traefik@server:0" --port "80:80@loadbalancer" --port "443:443@loadbalancer"; \
-	helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx --namespace ingress-nginx --create-namespace
+	@k3d cluster create --agents 2 --image rancher/k3s:v1.34.2-k3s1 \
+	--port "80:80@loadbalancer" \
+	--port "443:443@loadbalancer"
 k3d-delete-cluster:
 	@k3d cluster delete
 k3d-deploy-dependencies-federated:

@@ -209,6 +209,33 @@ func (suite *DatabaseTests) TestGetHeader() {
 	db.Close()
 }
 
+func (suite *DatabaseTests) TestBackupHeader() {
+	db, err := NewSDAdb(suite.dbConf)
+	assert.NoError(suite.T(), err, "got %v when creating new connection", err)
+	defer db.Close()
+
+	fileID, err := db.RegisterFile(nil, "/testuser/TestBackupHeader.c4gh", "testuser")
+	assert.NoError(suite.T(), err, "failed to register file in database")
+
+	testKeyHash := "test-key-hash-123"
+	_, err = db.DB.Exec("INSERT INTO sda.encryption_keys (key_hash) VALUES ($1) ON CONFLICT DO NOTHING", testKeyHash)
+	assert.NoError(suite.T(), err, "failed to setup test encryption key")
+
+	testHeader := []byte{1, 2, 3, 4, 5}
+	err = db.BackupHeader(fileID, testHeader, testKeyHash)
+	assert.NoError(suite.T(), err, "failed to backup header")
+
+	var storedHeaderHex string
+	var storedKeyHash string
+
+	query := "SELECT header, key_hash FROM sda.file_headers_backup WHERE file_id = $1"
+	err = db.DB.QueryRow(query, fileID).Scan(&storedHeaderHex, &storedKeyHash)
+
+	assert.NoError(suite.T(), err, "failed to find backup record in database")
+	assert.Equal(suite.T(), hex.EncodeToString(testHeader), storedHeaderHex)
+	assert.Equal(suite.T(), testKeyHash, storedKeyHash)
+}
+
 func (suite *DatabaseTests) TestSetVerified() {
 	db, err := NewSDAdb(suite.dbConf)
 	assert.NoError(suite.T(), err, "got (%v) when creating new connection", err)
@@ -1536,6 +1563,32 @@ func (suite *DatabaseTests) TestGetFileDetailsFromUUID_NotFound() {
 	assert.Error(suite.T(), err, "expected error for non-existent UUID")
 	assert.Empty(suite.T(), infoFile.User)
 	assert.Empty(suite.T(), infoFile.Path)
+
+	db.Close()
+}
+
+func (suite *DatabaseTests) TestSetSubmissionFileSize() {
+	db, err := NewSDAdb(suite.dbConf)
+	assert.NoError(suite.T(), err, "failed to create new connection")
+
+	fileID, err := db.RegisterFile(nil, "/test.file", "user")
+	if err != nil {
+		suite.FailNow("failed to register file", err)
+	}
+
+	fileSize := int64(time.Now().Nanosecond())
+	err = db.setSubmissionFileSize(fileID, fileSize)
+	if err != nil {
+		suite.FailNow("failed to set submission file size", err)
+	}
+
+	var sizeInDb int64
+	err = db.DB.QueryRow("SELECT submission_file_size FROM sda.files WHERE id=$1", fileID).Scan(&sizeInDb)
+	if err != nil {
+		suite.FailNow("failed to get submission file size from DB", err)
+	}
+
+	assert.Equal(suite.T(), fileSize, sizeInDb)
 
 	db.Close()
 }
