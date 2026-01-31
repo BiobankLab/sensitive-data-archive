@@ -89,7 +89,7 @@ jobs:
 
       - name: Retag PR image for sda-validator-orchestrator
         run: |
-          docker tag ghcr.io/biobanklab/sensitive-data-archive:PR${{ github.event.number }}-validator-orchestrator ghcr.io/${{ github.repository }}:${{ needs.tag_release.outputs.tag }}-validator-orchestrator
+          docker tag ghcr.io/biobanklab/sensitive-data-archive:PR${{ github.event.number }}-validator-orchestrator ghcr.io/biobanklab/sensitive-data-archive:${{ needs.tag_release.outputs.tag }}-validator-orchestrator
           docker push ghcr.io/biobanklab/sensitive-data-archive:${{ needs.tag_release.outputs.tag }}-validator-orchestrator
 
       - name: Retag PR image for doa
