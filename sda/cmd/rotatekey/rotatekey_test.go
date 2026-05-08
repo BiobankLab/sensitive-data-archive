@@ -124,7 +124,7 @@ func TestMain(m *testing.M) {
 
 	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
 	if err := pool.Retry(func() error {
-		res, err := client.Do(req)
+		res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 		if err != nil || res.StatusCode != 200 {
 			return err
 		}
@@ -212,7 +212,7 @@ func (ts *TestSuite) SetupSuite() {
 
 	ts.app.Conf.RotateKey.PublicKey = &publicKey
 
-	ts.fileID, err = ts.app.DB.RegisterFile(nil, "rotate-key-test/data.c4gh", "tester_example.org")
+	ts.fileID, err = ts.app.DB.RegisterFile(nil, "/inbox", "rotate-key-test/data.c4gh", "tester_example.org")
 	if err != nil {
 		ts.FailNow("Failed to register file in DB")
 	}

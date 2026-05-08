@@ -1,6 +1,7 @@
 package reader
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -16,6 +17,9 @@ func NewReader(backendName string) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(endPointsConfigurations) == 0 {
+		return nil, storageerrors.ErrorNoValidLocations
+	}
 
 	backend := &Reader{
 		configuredEndpoints: endPointsConfigurations,
@@ -28,12 +32,24 @@ func NewReader(backendName string) (*Reader, error) {
 		}
 
 		if !fileInfo.IsDir() {
-			return nil, fmt.Errorf("%s is not a directory", loc)
+			return nil, fmt.Errorf("%s is not a directory", loc.Path)
 		}
-	}
-	if len(backend.configuredEndpoints) == 0 {
-		return nil, storageerrors.ErrorNoValidLocations
 	}
 
 	return backend, nil
+}
+
+// Ping verifies all configured POSIX paths are accessible directories.
+func (r *Reader) Ping(_ context.Context) error {
+	for _, e := range r.configuredEndpoints {
+		fileInfo, err := os.Stat(e.Path)
+		if err != nil {
+			return fmt.Errorf("failed to ping POSIX path: %s, due to: %v", e.Path, err)
+		}
+		if !fileInfo.IsDir() {
+			return fmt.Errorf("failed to ping POSIX path: %s is not a directory", e.Path)
+		}
+	}
+
+	return nil
 }

@@ -13,19 +13,20 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
+	s3config "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/neicnordic/sensitive-data-archive/internal/broker"
+	"github.com/neicnordic/sensitive-data-archive/internal/config"
 	"github.com/neicnordic/sensitive-data-archive/internal/database"
 	"github.com/neicnordic/sensitive-data-archive/internal/helper"
-	"github.com/neicnordic/sensitive-data-archive/internal/storage"
 	"github.com/neicnordic/sensitive-data-archive/internal/userauth"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -34,8 +35,11 @@ import (
 
 type ProxyTests struct {
 	suite.Suite
-	S3Fakeconf storage.S3Conf // fakeserver
-	S3conf     storage.S3Conf // actual s3 container
+	s3Fakeconf     config.S3InboxConf // fakeserver
+	s3ClientToFake *s3.Client
+	s3Conf         config.S3InboxConf // actual s3 container
+	s3Client       *s3.Client
+
 	DBConf     database.DBConf
 	fakeServer *FakeServer
 	MQConf     broker.MQConf
@@ -54,22 +58,29 @@ func (s *ProxyTests) SetupTest() {
 	s.fakeServer = startFakeServer("9024")
 
 	// Create an s3config for the fake server
-	s.S3Fakeconf = storage.S3Conf{
-		URL:       "http://127.0.0.1",
-		Port:      9024,
+	s.s3Fakeconf = config.S3InboxConf{
+		Endpoint:  "http://127.0.0.1:9024",
 		AccessKey: "someAccess",
 		SecretKey: "someSecret",
 		Bucket:    "buckbuck",
 		Region:    "us-east-1",
 	}
+	var err error
+	s.s3ClientToFake, err = newS3Client(context.TODO(), s.s3Fakeconf)
+	if err != nil {
+		s.FailNow(err.Error())
+	}
 
-	s.S3conf = storage.S3Conf{
-		URL:       "http://127.0.0.1",
-		Port:      s3Port,
+	s.s3Conf = config.S3InboxConf{
+		Endpoint:  fmt.Sprintf("http://127.0.0.1:%d", s3Port),
 		AccessKey: "access",
 		SecretKey: "secretKey",
 		Bucket:    "buckbuck",
 		Region:    "us-east-1",
+	}
+	s.s3Client, err = newS3Client(context.TODO(), s.s3Conf)
+	if err != nil {
+		s.FailNow(err.Error())
 	}
 
 	// Create a configuration for the fake MQ
@@ -124,28 +135,31 @@ func (s *ProxyTests) SetupTest() {
 	if err != nil {
 		s.T().FailNow()
 	}
+	if err := s.token.Set("sub", "dummy"); err != nil {
+		s.T().FailNow()
+	}
 
-	s3cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(s.S3conf.AccessKey, s.S3conf.SecretKey, "")))
+	s3cfg, err := s3config.LoadDefaultConfig(context.TODO(), s3config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(s.s3Conf.AccessKey, s.s3Conf.SecretKey, "")))
 	if err != nil {
 		s.FailNow("bad")
 	}
 	s3Client := s3.NewFromConfig(
 		s3cfg,
 		func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(fmt.Sprintf("%s:%d", s.S3conf.URL, s.S3conf.Port))
-			o.EndpointOptions.DisableHTTPS = strings.HasPrefix(s.S3conf.URL, "http:")
-			o.Region = s.S3conf.Region
+			o.BaseEndpoint = aws.String(s.s3Conf.Endpoint)
+			o.EndpointOptions.DisableHTTPS = strings.HasPrefix(s.s3Conf.Endpoint, "http:")
+			o.Region = s.s3Conf.Region
 			o.UsePathStyle = true
 		},
 	)
-	_, _ = s3Client.CreateBucket(context.TODO(), &s3.CreateBucketInput{Bucket: aws.String(s.S3conf.Bucket)})
+	_, _ = s3Client.CreateBucket(context.TODO(), &s3.CreateBucketInput{Bucket: aws.String(s.s3Conf.Bucket)})
 	if err != nil {
 		_, _ = fmt.Println(err.Error())
 	}
 
 	output, err := s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
 		Body:            strings.NewReader("This is a test"),
-		Bucket:          aws.String(s.S3conf.Bucket),
+		Bucket:          aws.String(s.s3Conf.Bucket),
 		Key:             aws.String("/dummy/file"),
 		ContentEncoding: aws.String("application/octet-stream"),
 	})
@@ -158,10 +172,56 @@ func (s *ProxyTests) TearDownTest() {
 	s.database.Close()
 }
 
+// TestServeHTTP_concurrent_put_noRace verifies that after the in-memory
+// fileIDs map was replaced with Postgres-backed lookups (#2382), concurrent
+// PUT requests no longer trigger the "fatal error: concurrent map writes"
+// crash from #2295. The same-shaped test fails on main under -race with
+// warnings on proxy.go:182/185/195 and the fatal error. Here it should pass.
+func (s *ProxyTests) TestServeHTTP_concurrent_put_noRace() {
+	db, err := database.NewSDAdb(s.DBConf)
+	if !assert.NoError(s.T(), err) {
+		return
+	}
+	defer db.Close()
+
+	const workers = 50
+	const rounds = 20
+
+	db.DB.SetMaxOpenConns(workers)
+	db.DB.SetMaxIdleConns(workers)
+
+	proxy := NewProxy(s.s3Conf, s.s3Client, helper.NewAlwaysAllow(), nil, db, new(tls.Config))
+	proxy.s3Conf.Endpoint = ":" // force forwardRequestToBackend to fail fast
+
+	for round := 0; round < rounds; round++ {
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(workers)
+
+		for i := 0; i < workers; i++ {
+			n := round*workers + i
+			go func(n int) {
+				defer wg.Done()
+				req := httptest.NewRequest(
+					http.MethodPut,
+					fmt.Sprintf("/dummy/race-%04d.c4gh", n),
+					http.NoBody,
+				)
+				rec := httptest.NewRecorder()
+				<-start
+				proxy.ServeHTTP(rec, req)
+			}(n)
+		}
+		close(start)
+		wg.Wait()
+	}
+}
+
 type FakeServer struct {
-	ts     *httptest.Server
-	resp   string
-	pinged bool
+	ts          *httptest.Server
+	headHeaders map[string]string
+	resp        string
+	pinged      bool
 }
 
 func startFakeServer(port string) *FakeServer {
@@ -173,9 +233,15 @@ func startFakeServer(port string) *FakeServer {
 	f := FakeServer{}
 	foo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.pinged = true
-		log.Warnf("hello fake will return %s", f.resp)
+		if f.headHeaders != nil && r.Method == "HEAD" {
+			for k, v := range f.headHeaders {
+				w.Header().Set(k, v)
+			}
+			w.WriteHeader(http.StatusOK)
+
+			return
+		}
 		if f.resp != "" {
-			log.Warnf("fake writes %s", f.resp)
 			_, _ = fmt.Fprint(w, f.resp)
 		}
 	})
@@ -222,12 +288,12 @@ func (m *MockMessenger) SendMessage(uuid string, body []byte) error {
 
 // nolint:bodyclose
 func (s *ProxyTests) TestServeHTTP_disallowed() {
-	proxy := NewProxy(s.S3Fakeconf, &helper.AlwaysAllow{}, s.messenger, s.database, new(tls.Config))
+	proxy := NewProxy(s.s3Fakeconf, s.s3ClientToFake, &helper.AlwaysAllow{}, s.messenger, s.database, new(tls.Config))
 
 	r, _ := http.NewRequest("", "", nil)
 	w := httptest.NewRecorder()
 
-	log.Warnf("using proxy on port %d", s.S3Fakeconf.Port)
+	log.Warnf("using proxy at %s", s.s3Fakeconf.Endpoint)
 	// Remove bucket disallowed
 	r.Method = "DELETE"
 	r.URL, _ = url.Parse("/asdf/")
@@ -251,14 +317,6 @@ func (s *ProxyTests) TestServeHTTP_disallowed() {
 	assert.Equal(s.T(), 403, w.Result().StatusCode)
 	assert.Equal(s.T(), false, s.fakeServer.PingedAndRestore())
 
-	// Normal get is dissallowed
-	w = httptest.NewRecorder()
-	r.Method = "GET"
-	r.URL, _ = url.Parse("/asdf/")
-	proxy.ServeHTTP(w, r)
-	assert.Equal(s.T(), 403, w.Result().StatusCode)
-	assert.Equal(s.T(), false, s.fakeServer.PingedAndRestore())
-
 	// Put policy is disallowed
 	w = httptest.NewRecorder()
 	r.Method = "PUT"
@@ -276,7 +334,7 @@ func (s *ProxyTests) TestServeHTTP_disallowed() {
 	assert.Equal(s.T(), false, s.fakeServer.PingedAndRestore())
 
 	// Not authorized user get 401 response
-	proxy = NewProxy(s.S3Fakeconf, &helper.AlwaysDeny{}, s.messenger, s.database, new(tls.Config))
+	proxy = NewProxy(s.s3Fakeconf, s.s3ClientToFake, &helper.AlwaysDeny{}, s.messenger, s.database, new(tls.Config))
 	w = httptest.NewRecorder()
 	r.Method = "GET"
 	r.URL, _ = url.Parse("/username/file")
@@ -286,22 +344,22 @@ func (s *ProxyTests) TestServeHTTP_disallowed() {
 }
 
 func (s *ProxyTests) TestServeHTTPS3Unresponsive() {
-	s3conf := storage.S3Conf{
-		URL:       "http://localhost:40211",
+	s3conf := config.S3InboxConf{
+		Endpoint:  "http://localhost:40211",
 		AccessKey: "someAccess",
 		SecretKey: "someSecret",
 		Bucket:    "buckbuck",
 		Region:    "us-east-1",
 	}
-	proxy := NewProxy(s3conf, &helper.AlwaysAllow{}, s.messenger, s.database, new(tls.Config))
+	proxy := NewProxy(s3conf, s.s3Client, &helper.AlwaysAllow{}, s.messenger, s.database, new(tls.Config))
 
 	r, _ := http.NewRequest("", "", nil)
 	w := httptest.NewRecorder()
 
 	// Just try to list the files
 	r.Method = "GET"
-	r.URL, _ = url.Parse("/dummy/asdf")
-	proxy.allowedResponse(w, r, s.token)
+	r.URL, _ = url.Parse("/dummy")
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 500, w.Result().StatusCode) // nolint:bodyclose
 }
 
@@ -310,7 +368,7 @@ func (s *ProxyTests) TestServeHTTP_MQConnectionClosed() {
 	messenger, err := broker.NewMQ(s.MQConf)
 	assert.NoError(s.T(), err)
 	db, _ := database.NewSDAdb(s.DBConf)
-	proxy := NewProxy(s.S3Fakeconf, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
+	proxy := NewProxy(s.s3Fakeconf, s.s3ClientToFake, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
 
 	// Test that the mq connection will be restored when needed
 	proxy.messenger.Connection.Close()
@@ -318,7 +376,8 @@ func (s *ProxyTests) TestServeHTTP_MQConnectionClosed() {
 	r, _ := http.NewRequest("PUT", "/dummy/connectionclosed-file", nil)
 	w := httptest.NewRecorder()
 	s.fakeServer.resp = "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>test</Name><Prefix>/elixirid/db-test-file.txt</Prefix><KeyCount>1</KeyCount><MaxKeys>2</MaxKeys><Delimiter></Delimiter><IsTruncated>false</IsTruncated><Contents><Key>/elixirid/file.txt</Key><LastModified>2020-03-10T13:20:15.000Z</LastModified><ETag>&#34;0a44282bd39178db9680f24813c41aec-1&#34;</ETag><Size>5</Size><Owner><ID></ID><DisplayName></DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>"
-	proxy.allowedResponse(w, r, s.token)
+	s.fakeServer.headHeaders = map[string]string{"ETag": "\"0a44282bd39178db9680f24813c41aec-1\"", "Content-Length": "5"}
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode) // nolint:bodyclose
 	assert.False(s.T(), proxy.messenger.Connection.IsClosed())
 }
@@ -328,7 +387,7 @@ func (s *ProxyTests) TestServeHTTP_MQChannelClosed() {
 	messenger, err := broker.NewMQ(s.MQConf)
 	assert.NoError(s.T(), err)
 	db, _ := database.NewSDAdb(s.DBConf)
-	proxy := NewProxy(s.S3Fakeconf, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
+	proxy := NewProxy(s.s3Fakeconf, s.s3ClientToFake, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
 
 	// Test that the mq channel will be restored when needed
 	proxy.messenger.Channel.Close()
@@ -336,7 +395,8 @@ func (s *ProxyTests) TestServeHTTP_MQChannelClosed() {
 	r, _ := http.NewRequest("PUT", "/dummy/channelclosed-file", nil)
 	w := httptest.NewRecorder()
 	s.fakeServer.resp = "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>test</Name><Prefix>/elixirid/db-test-file.txt</Prefix><KeyCount>1</KeyCount><MaxKeys>2</MaxKeys><Delimiter></Delimiter><IsTruncated>false</IsTruncated><Contents><Key>/elixirid/file.txt</Key><LastModified>2020-03-10T13:20:15.000Z</LastModified><ETag>&#34;0a44282bd39178db9680f24813c41aec-1&#34;</ETag><Size>5</Size><Owner><ID></ID><DisplayName></DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>"
-	proxy.allowedResponse(w, r, s.token)
+	s.fakeServer.headHeaders = map[string]string{"ETag": "\"0a44282bd39178db9680f24813c41aec-1\"", "Content-Length": "5"}
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode) // nolint:bodyclose
 	assert.False(s.T(), proxy.messenger.Channel.IsClosed())
 }
@@ -346,7 +406,7 @@ func (s *ProxyTests) TestServeHTTP_MQ_Unavailable() {
 	messenger, err := broker.NewMQ(s.MQConf)
 	assert.NoError(s.T(), err)
 	db, _ := database.NewSDAdb(s.DBConf)
-	proxy := NewProxy(s.S3Fakeconf, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
+	proxy := NewProxy(s.s3Fakeconf, s.s3ClientToFake, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
 
 	// Test that the correct status code is returned when mq connection can't be created
 	proxy.messenger.Conf.Port = 123456
@@ -355,7 +415,8 @@ func (s *ProxyTests) TestServeHTTP_MQ_Unavailable() {
 	r, _ := http.NewRequest("PUT", "/dummy/mqunavailable-file", nil)
 	w := httptest.NewRecorder()
 	s.fakeServer.resp = "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>test</Name><Prefix>/elixirid/db-test-file.txt</Prefix><KeyCount>1</KeyCount><MaxKeys>2</MaxKeys><Delimiter></Delimiter><IsTruncated>false</IsTruncated><Contents><Key>/elixirid/file.txt</Key><LastModified>2020-03-10T13:20:15.000Z</LastModified><ETag>&#34;0a44282bd39178db9680f24813c41aec-1&#34;</ETag><Size>5</Size><Owner><ID></ID><DisplayName></DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>"
-	proxy.allowedResponse(w, r, s.token)
+	s.fakeServer.headHeaders = map[string]string{"ETag": "\"0a44282bd39178db9680f24813c41aec-1\"", "Content-Length": "5"}
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 500, w.Result().StatusCode) // nolint:bodyclose
 }
 
@@ -364,13 +425,13 @@ func (s *ProxyTests) TestServeHTTP_allowed() {
 	messenger, err := broker.NewMQ(s.MQConf)
 	assert.NoError(s.T(), err)
 	db, _ := database.NewSDAdb(s.DBConf)
-	proxy := NewProxy(s.S3Fakeconf, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
+	proxy := NewProxy(s.s3Fakeconf, s.s3ClientToFake, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
 
 	// List files works
-	r, err := http.NewRequest("GET", "/dummy/file", nil)
+	r, err := http.NewRequest("GET", "/dummy", nil)
 	assert.NoError(s.T(), err)
 	w := httptest.NewRecorder()
-	proxy.allowedResponse(w, r, s.token)
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode)
 	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
 	assert.Equal(s.T(), false, s.fakeServer.PingedAndRestore()) // Testing the pinged interface
@@ -380,15 +441,16 @@ func (s *ProxyTests) TestServeHTTP_allowed() {
 	r, err = http.NewRequest("PUT", "/dummy/file", nil)
 	assert.NoError(s.T(), err)
 	s.fakeServer.resp = "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>test</Name><Prefix>/elixirid/file.txt</Prefix><KeyCount>1</KeyCount><MaxKeys>2</MaxKeys><Delimiter></Delimiter><IsTruncated>false</IsTruncated><Contents><Key>/elixirid/file.txt</Key><LastModified>2020-03-10T13:20:15.000Z</LastModified><ETag>&#34;0a44282bd39178db9680f24813c41aec-1&#34;</ETag><Size>5</Size><Owner><ID></ID><DisplayName></DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>"
-	proxy.allowedResponse(w, r, s.token)
+	s.fakeServer.headHeaders = map[string]string{"ETag": "\"0a44282bd39178db9680f24813c41aec-1\";", "Content-Length": "5"}
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode)
 	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
 
 	// Put with partnumber sends no message
 	w = httptest.NewRecorder()
 	r.Method = "PUT"
-	r.URL, _ = url.Parse("/dummy/file?partNumber=5")
-	proxy.allowedResponse(w, r, s.token)
+	r.URL, _ = url.Parse("/dummy/file?partNumber=5&uploadId=1")
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode)
 	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
 
@@ -396,15 +458,7 @@ func (s *ProxyTests) TestServeHTTP_allowed() {
 	r.Method = "POST"
 	r.URL, _ = url.Parse("/dummy/file?uploadId=5")
 	w = httptest.NewRecorder()
-	proxy.allowedResponse(w, r, s.token)
-	assert.Equal(s.T(), 200, w.Result().StatusCode)
-	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
-
-	// Post without uploadId sends no message
-	r.Method = "POST"
-	r.URL, _ = url.Parse("/dummy/file")
-	w = httptest.NewRecorder()
-	proxy.allowedResponse(w, r, s.token)
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode)
 	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
 
@@ -412,7 +466,7 @@ func (s *ProxyTests) TestServeHTTP_allowed() {
 	r.Method = "DELETE"
 	r.URL, _ = url.Parse("/dummy/asdf?uploadId=123")
 	w = httptest.NewRecorder()
-	proxy.allowedResponse(w, r, s.token)
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode)
 	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
 
@@ -420,33 +474,33 @@ func (s *ProxyTests) TestServeHTTP_allowed() {
 	// that trigger different code paths in the code.
 	// Delimiter alone
 	r.Method = "GET"
-	r.URL, _ = url.Parse("/dummy/file?delimiter=puppe")
+	r.URL, _ = url.Parse("/dummy?delimiter=puppe")
 	w = httptest.NewRecorder()
-	proxy.allowedResponse(w, r, s.token)
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode)
 	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
 
 	// Show multiparts uploads
 	r.Method = "GET"
-	r.URL, _ = url.Parse("/dummy/file?uploads")
+	r.URL, _ = url.Parse("/dummy/file?uploadId=1")
 	w = httptest.NewRecorder()
-	proxy.allowedResponse(w, r, s.token)
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode)
 	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
 
 	// Delimiter alone together with prefix
 	r.Method = "GET"
-	r.URL, _ = url.Parse("/dummy/file?delimiter=puppe&prefix=asdf")
+	r.URL, _ = url.Parse("/dummy?delimiter=puppe&prefix=asdf")
 	w = httptest.NewRecorder()
-	proxy.allowedResponse(w, r, s.token)
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode)
 	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
 
 	// Location parameter
 	r.Method = "GET"
-	r.URL, _ = url.Parse("/dummy/file?location=fnuffe")
+	r.URL, _ = url.Parse("/dummy?location=fnuffe")
 	w = httptest.NewRecorder()
-	proxy.allowedResponse(w, r, s.token)
+	proxy.ServeHTTP(w, r)
 	assert.Equal(s.T(), 200, w.Result().StatusCode)
 	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
 
@@ -455,9 +509,25 @@ func (s *ProxyTests) TestServeHTTP_allowed() {
 	r.Method = "PUT"
 	r.URL, _ = url.Parse("/dummy/fi|le")
 	w = httptest.NewRecorder()
-	proxy.allowedResponse(w, r, s.token)
-	assert.Equal(s.T(), 406, w.Result().StatusCode)
+	proxy.ServeHTTP(w, r)
+	assert.Equal(s.T(), 400, w.Result().StatusCode)
 	assert.Equal(s.T(), false, s.fakeServer.PingedAndRestore())
+
+	// Get with list-type=2
+	w = httptest.NewRecorder()
+	r.Method = "GET"
+	r.URL, _ = url.Parse("/dummy?list-type=2")
+	proxy.ServeHTTP(w, r)
+	assert.Equal(s.T(), 200, w.Result().StatusCode)
+	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
+
+	// Get with uploads
+	w = httptest.NewRecorder()
+	r.Method = "GET"
+	r.URL, _ = url.Parse("/dummy?uploads")
+	proxy.ServeHTTP(w, r)
+	assert.Equal(s.T(), 200, w.Result().StatusCode)
+	assert.Equal(s.T(), true, s.fakeServer.PingedAndRestore())
 }
 
 func (s *ProxyTests) TestMessageFormatting() {
@@ -472,9 +542,10 @@ func (s *ProxyTests) TestMessageFormatting() {
 	assert.NoError(s.T(), claims.Set("sub", user))
 
 	// start proxy that denies everything
-	proxy := NewProxy(s.S3Fakeconf, &helper.AlwaysDeny{}, s.messenger, s.database, new(tls.Config))
+	proxy := NewProxy(s.s3Fakeconf, s.s3ClientToFake, &helper.AlwaysDeny{}, s.messenger, s.database, new(tls.Config))
 	s.fakeServer.resp = "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>test</Name><Prefix>/user/new_file.txt</Prefix><KeyCount>1</KeyCount><MaxKeys>2</MaxKeys><Delimiter></Delimiter><IsTruncated>false</IsTruncated><Contents><Key>/user/new_file.txt</Key><LastModified>2020-03-10T13:20:15.000Z</LastModified><ETag>&#34;0a44282bd39178db9680f24813c41aec-1&#34;</ETag><Size>1234</Size><Owner><ID></ID><DisplayName></DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>"
-	msg, err := proxy.CreateMessageFromRequest(r, claims, "new_file.txt")
+	s.fakeServer.headHeaders = map[string]string{"ETag": "\"0a44282bd39178db9680f24813c41aec-1\"", "Content-Length": "1234"}
+	msg, checksumValue, err := proxy.CreateMessageFromRequest(r.Context(), claims.Subject(), "new_file.txt")
 	assert.Nil(s.T(), err)
 	assert.IsType(s.T(), Event{}, msg)
 
@@ -485,12 +556,13 @@ func (s *ProxyTests) TestMessageFormatting() {
 	c, _ := json.Marshal(msg.Checksum[0])
 	checksum := Checksum{}
 	_ = json.Unmarshal(c, &checksum)
-	assert.Equal(s.T(), "sha256", checksum.Type)
-	assert.Equal(s.T(), "5b233b981dc12e7ccf4c242b99c042b7842b73b956ad662e4fe0f8354151538b", checksum.Value)
+	assert.Equal(s.T(), "md5", checksum.Type)
+	assert.Equal(s.T(), "0a44282bd39178db9680f24813c41aec-1", checksum.Value)
+	assert.Equal(s.T(), "0a44282bd39178db9680f24813c41aec-1", checksumValue)
 
 	// Test single shot upload
 	r.Method = "PUT"
-	msg, err = proxy.CreateMessageFromRequest(r, jwt.New(), "new_file.txt")
+	msg, _, err = proxy.CreateMessageFromRequest(r.Context(), claims.Subject(), "new_file.txt")
 	assert.Nil(s.T(), err)
 	assert.IsType(s.T(), Event{}, msg)
 	assert.Equal(s.T(), "upload", msg.Operation)
@@ -505,7 +577,7 @@ func (s *ProxyTests) TestDatabaseConnection() {
 	assert.NoError(s.T(), err)
 	defer messenger.Connection.Close()
 	// Start proxy that allows everything
-	proxy := NewProxy(s.S3Fakeconf, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
+	proxy := NewProxy(s.s3Fakeconf, s.s3ClientToFake, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
 
 	// PUT a file into the system
 	filename := "/dummy/db-test-file"
@@ -514,7 +586,8 @@ func (s *ProxyTests) TestDatabaseConnection() {
 	r, _ := http.NewRequest("PUT", filename, stringReader)
 	w := httptest.NewRecorder()
 	s.fakeServer.resp = "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>test</Name><Prefix>/elixirid/db-test-file.txt</Prefix><KeyCount>1</KeyCount><MaxKeys>2</MaxKeys><Delimiter></Delimiter><IsTruncated>false</IsTruncated><Contents><Key>/elixirid/file.txt</Key><LastModified>2020-03-10T13:20:15.000Z</LastModified><ETag>&#34;0a44282bd39178db9680f24813c41aec-1&#34;</ETag><Size>5</Size><Owner><ID></ID><DisplayName></DisplayName></Owner><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>"
-	proxy.allowedResponse(w, r, s.token)
+	s.fakeServer.headHeaders = map[string]string{"ETag": "\"0a44282bd39178db9680f24813c41aec-1\"", "Content-Length": "5"}
+	proxy.ServeHTTP(w, r)
 	res := w.Result()
 	defer res.Body.Close()
 	assert.Equal(s.T(), 200, res.StatusCode)
@@ -526,11 +599,12 @@ func (s *ProxyTests) TestDatabaseConnection() {
 	assert.Nil(s.T(), err, "Failed to connect to database")
 
 	// Check that the file is in the database
-	var fileID string
-	query := "SELECT id FROM sda.files WHERE submission_file_path = $1;"
-	err = db.DB.QueryRow(query, anonymFilename).Scan(&fileID)
+	var fileID, location string
+	query := "SELECT id, submission_location FROM sda.files WHERE submission_file_path = $1;"
+	err = db.DB.QueryRow(query, anonymFilename).Scan(&fileID, &location)
 	assert.Nil(s.T(), err, "Failed to query database")
 	assert.NotNil(s.T(), fileID, "File not found in database")
+	assert.Equal(s.T(), fmt.Sprintf("%s/%s", s.s3Fakeconf.Endpoint, s.s3Fakeconf.Bucket), location)
 
 	// Check that the "registered" status is in the database for this file
 	for _, status := range []string{"registered", "uploaded"} {
@@ -567,9 +641,8 @@ func (s *ProxyTests) TestCheckFileExists() {
 	messenger, err := broker.NewMQ(s.MQConf)
 	assert.NoError(s.T(), err)
 	defer messenger.Connection.Close()
-	proxy := NewProxy(s.S3conf, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
-
-	res, err := proxy.checkFileExists("/dummy/file")
+	proxy := NewProxy(s.s3Conf, s.s3Client, helper.NewAlwaysAllow(), messenger, db, new(tls.Config))
+	res, err := proxy.checkFileExists(context.TODO(), "/dummy/file")
 	assert.True(s.T(), res)
 	assert.Nil(s.T(), err)
 }
@@ -583,9 +656,8 @@ func (s *ProxyTests) TestCheckFileExists_nonExistingFile() {
 	messenger, err := broker.NewMQ(s.MQConf)
 	assert.NoError(s.T(), err)
 	defer messenger.Connection.Close()
-	proxy := NewProxy(s.S3conf, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
-
-	res, err := proxy.checkFileExists("nonexistingfilepath")
+	proxy := NewProxy(s.s3Conf, s.s3Client, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
+	res, err := proxy.checkFileExists(context.TODO(), "nonexistingfilepath")
 	assert.False(s.T(), res)
 	assert.Nil(s.T(), err)
 }
@@ -601,45 +673,24 @@ func (s *ProxyTests) TestCheckFileExists_unresponsive() {
 	defer messenger.Connection.Close()
 
 	// Unaccessible S3 (wrong port)
-	proxy := NewProxy(s.S3conf, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
-	proxy.s3.Port = 1111
-
-	res, err := proxy.checkFileExists("nonexistingfilepath")
+	proxy := NewProxy(s.s3Conf, s.s3Client, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
+	proxy.s3Conf.Endpoint = "http://127.0.0.1:1111"
+	proxy.s3Client, err = newS3Client(context.TODO(), proxy.s3Conf)
+	assert.NoError(s.T(), err)
+	res, err := proxy.checkFileExists(context.TODO(), "nonexistingfilepath")
 	assert.False(s.T(), res)
 	assert.NotNil(s.T(), err)
 	assert.Contains(s.T(), err.Error(), "S3: HeadObject")
 
 	// Bad access key gives 403
-	proxy.s3.Port = s.S3conf.Port
-	proxy.s3.AccessKey = "invaild"
-	res, err = proxy.checkFileExists("nonexistingfilepath")
+	proxy.s3Conf.Endpoint = s.s3Conf.Endpoint
+	proxy.s3Conf.AccessKey = "invaild"
+	proxy.s3Client, err = newS3Client(context.TODO(), proxy.s3Conf)
+	assert.NoError(s.T(), err)
+	res, err = proxy.checkFileExists(context.TODO(), "nonexistingfilepath")
 	assert.False(s.T(), res)
 	assert.NotNil(s.T(), err)
 	assert.Contains(s.T(), err.Error(), "StatusCode: 403")
-}
-
-func (s *ProxyTests) TestStoreObjectSizeInDB() {
-	db, err := database.NewSDAdb(s.DBConf)
-	assert.NoError(s.T(), err)
-	defer db.Close()
-
-	mq, err := broker.NewMQ(s.MQConf)
-	assert.NoError(s.T(), err)
-	defer mq.Connection.Close()
-
-	p := NewProxy(s.S3conf, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
-	p.database = db
-
-	fileID, err := db.RegisterFile(nil, "/dummy/file", "test-user")
-	assert.NoError(s.T(), err)
-	assert.NotNil(s.T(), fileID)
-
-	assert.NoError(s.T(), p.storeObjectSizeInDB("/dummy/file", fileID))
-
-	const getObjectSize = "SELECT submission_file_size FROM sda.files WHERE id = $1;"
-	var objectSize int64
-	assert.NoError(s.T(), p.database.DB.QueryRow(getObjectSize, fileID).Scan(&objectSize))
-	assert.Equal(s.T(), int64(14), objectSize)
 }
 
 func (s *ProxyTests) TestStoreObjectSizeInDB_dbFailure() {
@@ -650,15 +701,15 @@ func (s *ProxyTests) TestStoreObjectSizeInDB_dbFailure() {
 	assert.NoError(s.T(), err)
 	defer mq.Connection.Close()
 
-	p := NewProxy(s.S3conf, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
-	p.database = db
+	proxy := NewProxy(s.s3Conf, s.s3Client, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
+	proxy.database = db
 
-	fileID, err := db.RegisterFile(nil, "/dummy/file", "test-user")
+	fileID, err := db.RegisterFile(nil, "/inbox", "/dummy/file", "test-user")
 	assert.NoError(s.T(), err)
 	assert.NotNil(s.T(), fileID)
 
 	db.Close()
-	assert.NoError(s.T(), p.storeObjectSizeInDB("/dummy/file", fileID))
+	assert.NoError(s.T(), proxy.storeObjectSizeInDB(context.TODO(), "/dummy/file", fileID))
 }
 
 func (s *ProxyTests) TestStoreObjectSizeInDB_s3Failure() {
@@ -669,20 +720,23 @@ func (s *ProxyTests) TestStoreObjectSizeInDB_s3Failure() {
 	assert.NoError(s.T(), err)
 	defer mq.Connection.Close()
 
-	p := NewProxy(s.S3conf, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
-	p.database = db
-
-	fileID, err := db.RegisterFile(nil, "/dummy/file", "test-user")
+	proxy := NewProxy(s.s3Conf, s.s3Client, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
+	proxy.database = db
+	fileID, err := db.RegisterFile(nil, "/inbox", "/dummy/file", "test-user")
 	assert.NoError(s.T(), err)
 	assert.NotNil(s.T(), fileID)
 
 	// Detect autentication failure
-	p.s3.AccessKey = "badKey"
-	assert.Error(s.T(), p.storeObjectSizeInDB("/dummy/file", fileID))
+	proxy.s3Conf.AccessKey = "badKey"
+	proxy.s3Client, err = newS3Client(context.TODO(), proxy.s3Conf)
+	assert.NoError(s.T(), err)
+	assert.Error(s.T(), proxy.storeObjectSizeInDB(context.TODO(), "/dummy/file", fileID))
 
 	// Detect unresponsive backend service
-	p.s3.Port = 1234
-	assert.Error(s.T(), p.storeObjectSizeInDB("/dummy/file", fileID))
+	proxy.s3Conf.Endpoint = "http://127.0.0.1:1234"
+	proxy.s3Client, err = newS3Client(context.TODO(), proxy.s3Conf)
+	assert.NoError(s.T(), err)
+	assert.Error(s.T(), proxy.storeObjectSizeInDB(context.TODO(), "/dummy/file", fileID))
 }
 
 // This test is intended to try to catch some issues we sometimes see when a query to the S3 backend
@@ -696,37 +750,37 @@ func (s *ProxyTests) TestStoreObjectSizeInDB_fastCheck() {
 	assert.NoError(s.T(), err)
 	defer mq.Connection.Close()
 
-	p := NewProxy(s.S3conf, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
+	p := NewProxy(s.s3Conf, s.s3Client, helper.NewAlwaysAllow(), s.messenger, s.database, new(tls.Config))
 	p.database = db
 
-	fileID, err := db.RegisterFile(nil, "/test/new_file", "test-user")
+	fileID, err := db.RegisterFile(nil, "/inbox", "/test/new_file", "test-user")
 	assert.NoError(s.T(), err)
 	assert.NotNil(s.T(), fileID)
 
-	s3cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(s.S3conf.AccessKey, s.S3conf.SecretKey, "")))
+	s3cfg, err := s3config.LoadDefaultConfig(context.TODO(), s3config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(s.s3Conf.AccessKey, s.s3Conf.SecretKey, "")))
 	if err != nil {
-		s.FailNow("bad")
+		s.FailNow(err.Error())
 	}
 	s3Client := s3.NewFromConfig(
 		s3cfg,
 		func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(fmt.Sprintf("%s:%d", s.S3conf.URL, s.S3conf.Port))
-			o.EndpointOptions.DisableHTTPS = strings.HasPrefix(s.S3conf.URL, "http:")
-			o.Region = s.S3conf.Region
+			o.BaseEndpoint = aws.String(s.s3Conf.Endpoint)
+			o.EndpointOptions.DisableHTTPS = strings.HasPrefix(s.s3Conf.Endpoint, "http:")
+			o.Region = s.s3Conf.Region
 			o.UsePathStyle = true
 		},
 	)
 
 	output, err := s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
 		Body:            strings.NewReader(strings.Repeat("A", 10*1024*1024)),
-		Bucket:          aws.String(s.S3conf.Bucket),
+		Bucket:          aws.String(s.s3Conf.Bucket),
 		Key:             aws.String("/test/new_file"),
 		ContentEncoding: aws.String("application/octet-stream"),
 	})
 	assert.NoError(s.T(), err)
 	assert.NotNil(s.T(), output, output)
 
-	assert.NoError(s.T(), p.storeObjectSizeInDB("/test/new_file", fileID))
+	assert.NoError(s.T(), p.storeObjectSizeInDB(context.TODO(), "/test/new_file", fileID))
 
 	const getObjectSize = "SELECT submission_file_size FROM sda.files WHERE id = $1;"
 	var objectSize int64

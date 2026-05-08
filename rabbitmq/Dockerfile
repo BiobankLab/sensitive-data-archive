@@ -1,13 +1,9 @@
-FROM rabbitmq:3.12.13-management-alpine
+FROM rabbitmq:4.2.4-management-alpine
 
 ARG BUILD_DATE
 ARG SOURCE_COMMIT
 
-LABEL org.opencontainers.image.authors="NeIC System Developers"
-LABEL org.label-schema.schema-version="1.0"
-LABEL org.label-schema.build-date=$BUILD_DATE
-LABEL org.label-schema.vcs-url="https://github.com/biobanklab/sda"
-LABEL org.label-schema.vcs-ref=$SOURCE_COMMIT
+
 
 ENV RABBITMQ_CONFIG_FILE=/var/lib/rabbitmq/rabbitmq.conf
 ENV RABBITMQ_ADVANCED_CONFIG_FILE=/var/lib/rabbitmq/advanced.config

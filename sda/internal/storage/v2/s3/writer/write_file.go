@@ -7,15 +7,14 @@ import (
 	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/neicnordic/sensitive-data-archive/internal/storage/v2/storageerrors"
 )
 
 func (writer *Writer) WriteFile(ctx context.Context, filePath string, fileContent io.Reader) (string, error) {
 	// Find endpoint / bucket that is to be used for writing
 	writer.Lock()
-	activeBucket, err := writer.activeEndpoint.findActiveBucket(ctx, writer.locationBroker)
+	activeBucket, err := writer.activeEndpoint.findActiveBucket(ctx, writer.backendName, writer.locationBroker)
 	if err != nil && !errors.Is(err, storageerrors.ErrorNoFreeBucket) {
 		writer.Unlock()
 
@@ -29,7 +28,7 @@ func (writer *Writer) WriteFile(ctx context.Context, filePath string, fileConten
 				continue
 			}
 
-			activeBucket, err = endpointConf.findActiveBucket(ctx, writer.locationBroker)
+			activeBucket, err = endpointConf.findActiveBucket(ctx, writer.backendName, writer.locationBroker)
 			if err != nil {
 				if errors.Is(err, storageerrors.ErrorNoFreeBucket) {
 					continue
@@ -50,18 +49,16 @@ func (writer *Writer) WriteFile(ctx context.Context, filePath string, fileConten
 		return "", err
 	}
 
-	uploader := manager.NewUploader(client, func(u *manager.Uploader) {
+	uploader := transfermanager.New(client, func(u *transfermanager.Options) {
 		// Type conversation safe as chunkSizeBytes checked to be between 5mb and 1gb (in bytes)
 		//nolint:gosec // disable G115
-		u.PartSize = int64(writer.activeEndpoint.chunkSizeBytes)
-		u.LeavePartsOnError = false
+		u.PartSizeBytes = int64(writer.activeEndpoint.chunkSizeBytes)
 	})
 
-	_, err = uploader.Upload(ctx, &s3.PutObjectInput{
-		Body:            fileContent,
-		Bucket:          aws.String(activeBucket),
-		Key:             aws.String(filePath),
-		ContentEncoding: aws.String("application/octet-stream"),
+	_, err = uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{
+		Body:   fileContent,
+		Bucket: aws.String(activeBucket),
+		Key:    aws.String(filePath),
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to upload object: %s, bucket: %s, endpoint: %s, due to: %v", filePath, activeBucket, writer.activeEndpoint.Endpoint, err)
