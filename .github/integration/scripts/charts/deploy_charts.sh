@@ -95,5 +95,6 @@ if [ "$1" == "sda-svc" ]; then
         --set reencrypt.readinessProbe.grpc.port="$GRPC_PORT" \
         --set global.c4gh.rotatePubKeyData="$ROTATE_PUB_BASE64" \
         -f "$dir/values.yaml" \
-        --wait
+        --wait \
+        --timeout 10m
 fi

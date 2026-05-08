@@ -54,6 +54,9 @@ jobs:
             image-tag-suffix: "-sftp-inbox"
 
     steps:
+      - name: Set lowercase repo name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
       - name: Checkout code
         uses: actions/checkout@v6
 
@@ -70,23 +73,33 @@ jobs:
           context: ./${{ matrix.path }}
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:PR${{ github.event.number }}${{ matrix.image-tag-suffix }}
+            ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}${{ matrix.image-tag-suffix }}
           labels: | # As this is a PR we set the version by the git sha
             org.opencontainers.image.title=${{ github.repository }}
             org.opencontainers.image.description=Sensitive Data Archive - ${{ matrix.name }}
             org.opencontainers.image.authors=NeIC System Developers
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }}$/{{ matrix.path }}
-            org.opencontainers.image.created=${{ github.event.pull_request.updated_at }}          
-            org.opencontainers.image.revision=${{ github.sha }} 
+            org.opencontainers.image.created=${{ github.event.pull_request.updated_at }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.sha }}
+
+      - name: Get current date for Trivy cache key
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Restore Trivy DB cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ github.workspace }}/.cache/trivy
+          key: cache-trivy-${{ steps.date.outputs.date }}
+          restore-keys: |
+            cache-trivy-
 
       - name: Run Trivy vulnerability scanner on ${{ matrix.name }} sarif
         uses: aquasecurity/trivy-action@v0.36.0
-        env: # As we have the Update Trivy Cache cronjob which updates the cache daily we do not it per scan
-          TRIVY_SKIP_DB_UPDATE: true
-          TRIVY_SKIP_JAVA_DB_UPDATE: true
         with:
-          image-ref: ghcr.io/${{ github.repository }}:PR${{ github.event.number }}${{ matrix.image-tag-suffix }}
+          image-ref: ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}${{ matrix.image-tag-suffix }}
+          cache-dir: ${{ github.workspace }}/.cache/trivy
           format: "sarif"
           hide-progress: true
           ignore-unfixed: true
@@ -96,14 +109,14 @@ jobs:
       # We do this step such that the report in the Github code scanning is more clear for which image a vulnerability originates from
       - name: Append image info to sarif file
         run: |
-          jq '.runs[].results[].locations[].physicalLocation.artifactLocation.uri |= "ghcr.io/${{ github.repository }}:PR${{ github.event.number }}${{ matrix.image-tag-suffix }}/" + .' \
+          jq '.runs[].results[].locations[].physicalLocation.artifactLocation.uri |= "ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}${{ matrix.image-tag-suffix }}/" + .' \
             results.sarif > annotated_results.sarif 
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: annotated_results.sarif
-          category: ghcr.io/${{ github.repository }}:PR${{ github.event.number }}${{ matrix.image-tag-suffix }}
+          category: ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}${{ matrix.image-tag-suffix }}
 
       # Only run trivy scan with markdown output and add PR comment if PR changes the relevant file
       - uses: dorny/paths-filter@v4
@@ -116,11 +129,9 @@ jobs:
       - name: Run Trivy vulnerability scanner on ${{ matrix.name }} markdown output
         if: steps.changes.outputs.changed == 'true'
         uses: aquasecurity/trivy-action@v0.36.0
-        env: # As we have the Update Trivy Cache cronjob which updates the cache daily we do not it per scan
-          TRIVY_SKIP_DB_UPDATE: true
-          TRIVY_SKIP_JAVA_DB_UPDATE: true
         with:
-          image-ref: ghcr.io/${{ github.repository }}:PR${{ github.event.number }}${{ matrix.image-tag-suffix }}
+          image-ref: ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}${{ matrix.image-tag-suffix }}
+          cache-dir: ${{ github.workspace }}/.cache/trivy
           format: template
           template: '@.github/trivy_report_template_markdown.tpl'
           output: trivy-results.md

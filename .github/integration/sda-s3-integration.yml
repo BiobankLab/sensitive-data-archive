@@ -255,7 +255,7 @@ services:
 
   # New download service (sda/cmd/download) - feature of this branch
   download:
-    image: ghcr.io/neicnordic/sensitive-data-archive:PR${PR_NUMBER}
+    image: ghcr.io/biobanklab/sensitive-data-archive:PR${PR_NUMBER}
     command:
       - sda-download
       - "--config-file=/config.yaml"

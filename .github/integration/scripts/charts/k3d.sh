@@ -6,7 +6,8 @@ k8s="$(curl --retry 100 -L -s https://dl.k8s.io/release/stable.txt)"
 curl --retry 100 -s -L https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | sudo bash
 
 if [ -n "$1" ]; then
-    k8s=$(k3d version list k3s | grep "$1" | head -n 1 | cut -d '-' -f 1)
+    matched=$(k3d version list k3s | grep "$1" | head -n 1 | cut -d '-' -f 1) || true
+    [ -n "$matched" ] && k8s="$matched"
 fi
 
 curl --retry 100 -sLO https://dl.k8s.io/release/"$k8s"/bin/linux/amd64/kubectl

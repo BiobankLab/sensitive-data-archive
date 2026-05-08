@@ -48,6 +48,9 @@ jobs:
             image-tag-suffix: "-sftp-inbox"
 
     steps:
+      - name: Set lowercase repo name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
       - name: Checkout code
         uses: actions/checkout@v6
 
@@ -64,7 +67,7 @@ jobs:
           context: ./${{ matrix.path }}
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}${{ matrix.image-tag-suffix }}
+            ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}${{ matrix.image-tag-suffix }}
           labels: |
             org.opencontainers.image.title=${{ github.repository }}
             org.opencontainers.image.description=Sensitive Data Archive - ${{ matrix.name }}
@@ -81,7 +84,7 @@ jobs:
           TRIVY_SKIP_DB_UPDATE: true
           TRIVY_SKIP_JAVA_DB_UPDATE: true
         with:
-          image-ref: ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}${{ matrix.image-tag-suffix }}
+          image-ref: ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}${{ matrix.image-tag-suffix }}
           format: "sarif"
           hide-progress: true
           ignore-unfixed: true
@@ -91,14 +94,14 @@ jobs:
       # We do this step such that the report in the Github code scanning is more clear for which image a vulnerability originates from
       - name: Append image info to sarif file
         run: |
-          jq '.runs[].results[].locations[].physicalLocation.artifactLocation.uri |= "ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}${{ matrix.image-tag-suffix }}/" + .' \
+          jq '.runs[].results[].locations[].physicalLocation.artifactLocation.uri |= "ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}${{ matrix.image-tag-suffix }}/" + .' \
             results.sarif > annotated_results.sarif 
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: annotated_results.sarif
-          category: ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}${{ matrix.image-tag-suffix }}
+          category: ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}${{ matrix.image-tag-suffix }}
 
   code_ql:
     name: Run CodeQL
@@ -155,6 +158,9 @@ jobs:
     name: Create SDA release
     runs-on: ubuntu-latest
     steps:
+      - name: Set lowercase repo name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
       - name: Checkout
         uses: actions/checkout@v6
       - name: Release
@@ -164,10 +170,10 @@ jobs:
           tag_name: "${{ env.VERSION_TAG }}"
           body: |
             # Docker images:
-            - ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}
-            - ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}-download
-            - ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}-doa
-            - ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}-validator-orchestrator
-            - ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}-stfp-inbox
-            - ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}-postgres
-            - ghcr.io/${{ github.repository }}:${{ env.VERSION_TAG }}-rabbitmq
+            - ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}
+            - ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}-download
+            - ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}-doa
+            - ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}-validator-orchestrator
+            - ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}-stfp-inbox
+            - ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}-postgres
+            - ghcr.io/${{ env.REPO_LC }}:${{ env.VERSION_TAG }}-rabbitmq

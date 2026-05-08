@@ -349,7 +349,7 @@ func (c *Map) appConfig() error {
 		log.Infoln("Internal c4gh key-pair loaded")
 	}
 
-	if !slices.Contains(availableMiddlewares, c.App.Middleware) {
+	if !slices.Contains(availableMiddlewares, c.App.Middleware) { //nolint:govet
 		err := fmt.Errorf("app.middleware value=%v is not one of allowed values=%v", c.App.Middleware, availableMiddlewares)
 
 		return err
