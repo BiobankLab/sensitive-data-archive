@@ -2,6 +2,20 @@ apiVersion: v1
 entries:
   sda-db:
   - apiVersion: v2
+    appVersion: v3.1.37
+    created: "2026-05-10T21:47:42.735538656Z"
+    description: Database component for Sensitive Data Archive (SDA) installation
+    digest: 04764f26d594bfcf9af772e7e04c06eb64c56b73b3f47a10cd43dd201bc0e6c8
+    home: https://neic-sda.readthedocs.io
+    icon: https://neic.no/assets/images/logo.png
+    kubeVersion: '>= 1.26.0'
+    name: sda-db
+    sources:
+    - https://github.com/neicnordic/sensitive-data-archive
+    urls:
+    - https://github.com/BiobankLab/sensitive-data-archive/releases/download/sda-db-2.0.28/sda-db-2.0.28.tgz
+    version: 2.0.28
+  - apiVersion: v2
     appVersion: v0.0.3
     created: "2026-01-31T23:42:50.30513107Z"
     description: Database component for Sensitive Data Archive (SDA) installation
@@ -16,6 +30,20 @@ entries:
     - https://github.com/BiobankLab/sensitive-data-archive/releases/download/sda-db-0.1.1/sda-db-0.1.1.tgz
     version: 0.1.1
   sda-mq:
+  - apiVersion: v2
+    appVersion: v3.1.37
+    created: "2026-05-10T21:47:42.870862442Z"
+    description: RabbitMQ component for Sensitive Data Archive (SDA) installation
+    digest: 061428afead675344f827adcbebe4dcd81ae6cd42d3cf1fa548962e958dd2007
+    home: https://neic-sda.readthedocs.io
+    icon: https://neic.no/assets/images/logo.png
+    kubeVersion: '>= 1.26.0'
+    name: sda-mq
+    sources:
+    - https://github.com/neicnordic/sda-helm
+    urls:
+    - https://github.com/BiobankLab/sensitive-data-archive/releases/download/sda-mq-2.1.3/sda-mq-2.1.3.tgz
+    version: 2.1.3
   - apiVersion: v2
     appVersion: v0.0.3
     created: "2026-01-31T23:42:50.448398502Z"
@@ -32,6 +60,20 @@ entries:
     version: 0.1.1
   sda-svc:
   - apiVersion: v2
+    appVersion: v3.1.37
+    created: "2026-05-10T21:47:43.012617588Z"
+    description: Components for Sensitive Data Archive (SDA) installation
+    digest: 61e1755b10cc10e7dfaffc722f3988f68b2195df3c08f30b40c3cb5a3a79babb
+    home: https://neic-sda.readthedocs.io
+    icon: https://neic.no/assets/images/logo.png
+    kubeVersion: '>= 1.26.0'
+    name: sda-svc
+    sources:
+    - https://github.com/neicnordic/sensitive-data-archive
+    urls:
+    - https://github.com/BiobankLab/sensitive-data-archive/releases/download/sda-svc-3.4.0/sda-svc-3.4.0.tgz
+    version: 3.4.0
+  - apiVersion: v2
     appVersion: v0.0.3
     created: "2026-01-31T23:42:50.585084564Z"
     description: Components for Sensitive Data Archive (SDA) installation
@@ -45,4 +87,4 @@ entries:
     urls:
     - https://github.com/BiobankLab/sensitive-data-archive/releases/download/sda-svc-0.1.1/sda-svc-0.1.1.tgz
     version: 0.1.1
-generated: "2026-01-31T23:42:50.585095955Z"
+generated: "2026-05-10T21:47:43.012637305Z"
