@@ -1,6 +1,7 @@
 package reader
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -45,10 +46,8 @@ func (ts *ReaderTestSuite) SetupSuite() {
 	if _, err = bigFile.WriteString("This is a big file for testing seekable s3 reader"); err != nil {
 		ts.FailNow("failed to write big test file", err)
 	}
-	for range 6 * 1000 * 1000 {
-		if _, err = bigFile.WriteString("a"); err != nil {
-			ts.FailNow("failed to write big test file", err)
-		}
+	if _, err := bigFile.Write(bytes.Repeat([]byte{'a'}, 6*1000*1000)); err != nil {
+		ts.FailNow("failed to write big test file", err)
 	}
 	if _, err = bigFile.WriteString("file is ending now"); err != nil {
 		ts.FailNow("failed to write big test file", err)
@@ -94,7 +93,7 @@ func (ts *ReaderTestSuite) SetupSuite() {
 			}
 
 			w.WriteHeader(http.StatusNotFound)
-			_, _ = fmt.Fprintf(w, "no file found at: %s", req.RequestURI)
+			_, _ = fmt.Fprintf(w, "no file found at: %s", req.RequestURI) // #nosec G705 -- request controlled by unit test
 
 		case strings.HasPrefix(req.RequestURI, "/mock_s3_1_bucket_2"):
 			if req.Method == "GET" && strings.HasSuffix(req.RequestURI, "GetObject") && strings.Contains(req.RequestURI, "file2.txt") {
@@ -141,10 +140,10 @@ func (ts *ReaderTestSuite) SetupSuite() {
 			}
 
 			w.WriteHeader(http.StatusNotFound)
-			_, _ = fmt.Fprintf(w, "no file found at: %s", req.RequestURI)
+			_, _ = fmt.Fprintf(w, "no file found at: %s", req.RequestURI) // #nosec G705 -- request controlled by unit test
 		default:
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = fmt.Fprintf(w, "unexpected path called: %s", req.RequestURI)
+			_, _ = fmt.Fprintf(w, "unexpected path called: %s", req.RequestURI) // #nosec G705 -- request controlled by unit test
 		}
 	}))
 
@@ -214,7 +213,7 @@ func (ts *ReaderTestSuite) SetupSuite() {
 			}
 
 			w.WriteHeader(http.StatusNotFound)
-			_, _ = fmt.Fprintf(w, "no file found at: %s", req.RequestURI)
+			_, _ = fmt.Fprintf(w, "no file found at: %s", req.RequestURI) // #nosec G705 -- request controlled by unit test
 		case strings.HasPrefix(req.RequestURI, "/mock_s3_2_bucket_2"):
 			if req.Method == "GET" && strings.HasSuffix(req.RequestURI, "GetObject") && strings.Contains(req.RequestURI, "file4.txt") {
 				w.WriteHeader(http.StatusOK)
@@ -231,10 +230,10 @@ func (ts *ReaderTestSuite) SetupSuite() {
 			}
 
 			w.WriteHeader(http.StatusNotFound)
-			_, _ = fmt.Fprintf(w, "no file found at: %s", req.RequestURI)
+			_, _ = fmt.Fprintf(w, "no file found at: %s", req.RequestURI) // #nosec G705 -- request controlled by unit test
 		default:
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = fmt.Fprintf(w, "unexpected path called: %s", req.RequestURI)
+			_, _ = fmt.Fprintf(w, "unexpected path called: %s", req.RequestURI) // #nosec G705 -- request controlled by unit test
 		}
 	}))
 
@@ -290,12 +289,26 @@ storage:
 `,
 			expectedErrorMsg: "missing required parameter: endpoint",
 		}, {
-			testName: "MissingAccessKey",
+			testName: "MissingEndpointScheme",
 			config: `
 storage:
   config_test:
     s3:
     - endpoint: 123
+      access_key: access_key1
+      secret_key: secret_key1
+      disable_https: true
+      region: us-east-1
+      chunk_size: 1mb
+`,
+			expectedErrorMsg: "unsupported or no scheme in endpoint",
+		}, {
+			testName: "MissingAccessKey",
+			config: `
+storage:
+  config_test:
+    s3:
+    - endpoint: http://123
       secret_key: secret_key1
       disable_https: true
       region: us-east-1
@@ -308,7 +321,7 @@ storage:
 storage:
   config_test:
     s3:
-    - endpoint: 123
+    - endpoint: http://123
       access_key: access_key1
       disable_https: true
       region: us-east-1
@@ -321,7 +334,7 @@ storage:
 storage:
   config_test:
     s3:
-    - endpoint: 123
+    - endpoint: http://123
       access_key: access_key1
       secret_key: secret_key1
       disable_https: true
@@ -739,4 +752,49 @@ func (ts *ReaderTestSuite) TestFileReadSeeker_Internal_Cache() {
 func (ts *ReaderTestSuite) TestNewFileReaderSeeker_InvalidLocation() {
 	_, err := ts.reader.NewFileReader(context.TODO(), "", "")
 	ts.EqualError(err, storageerrors.ErrorInvalidLocation.Error())
+}
+
+func (ts *ReaderTestSuite) TestPing() {
+	err := ts.reader.Ping(context.TODO())
+	ts.NoError(err)
+}
+
+func (ts *ReaderTestSuite) TestPing_EndpointDown() {
+	// Create a reader with a stopped server
+	configDir := ts.T().TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasSuffix(req.RequestURI, "ListBuckets") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?><ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>`)
+
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(fmt.Sprintf(`
+storage:
+  ping_fail_test:
+    s3:
+    - endpoint: %s
+      access_key: ak
+      secret_key: sk
+      disable_https: true
+      region: us-east-1
+`, server.URL)), 0600); err != nil {
+		ts.FailNow(err.Error())
+	}
+
+	viper.SetConfigFile(filepath.Join(configDir, "config.yaml"))
+	ts.Require().NoError(viper.ReadInConfig())
+
+	reader, err := NewReader(context.TODO(), "ping_fail_test")
+	ts.Require().NoError(err)
+
+	// Stop the server, then ping should fail
+	server.Close()
+
+	err = reader.Ping(context.TODO())
+	ts.Error(err)
+	ts.Contains(err.Error(), "failed to ping S3 endpoint")
 }

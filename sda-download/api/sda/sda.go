@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -22,14 +23,14 @@ import (
 	"github.com/neicnordic/sda-download/internal/config"
 	"github.com/neicnordic/sda-download/internal/database"
 	"github.com/neicnordic/sda-download/internal/reencrypt"
-	"github.com/neicnordic/sda-download/internal/storage"
+	"github.com/neicnordic/sda-download/internal/storage/v2"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-var Backend storage.Backend
+var ArchiveReader storage.Reader
 
 func sanitizeString(str string) string {
 	var pattern = regexp.MustCompile(`(https?://[^\s/$.?#].[^\s]+|[A-Za-z0-9-_:.]+)`)
@@ -37,7 +38,7 @@ func sanitizeString(str string) string {
 	return pattern.ReplaceAllString(str, "[identifier]: $1")
 }
 
-func reencryptHeader(oldHeader []byte, reencKey string) ([]byte, error) {
+func reencryptHeader(ctx context.Context, oldHeader []byte, reencKey string) ([]byte, error) {
 	var opts []grpc.DialOption
 	switch {
 	case config.Config.Reencrypt.ClientKey != "" && config.Config.Reencrypt.ClientCert != "":
@@ -92,7 +93,7 @@ func reencryptHeader(oldHeader []byte, reencKey string) ([]byte, error) {
 	defer conn.Close()
 
 	timeoutDuration := time.Duration(config.Config.Reencrypt.Timeout) * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration)
+	ctx, cancel := context.WithTimeout(ctx, timeoutDuration)
 	defer cancel()
 
 	c := reencrypt.NewReencryptClient(conn)
@@ -216,7 +217,14 @@ func Download(c *gin.Context) {
 		return
 	}
 
-	if c.Param("type") != "encrypted" && c.GetHeader("Client-Public-Key") != "" {
+	requestPublicKey, err := getPublicKeyFromRequest(c)
+	if err != nil {
+		c.String(http.StatusBadRequest, err.Error())
+
+		return
+	}
+
+	if c.Param("type") != "encrypted" && requestPublicKey != "" {
 		c.String(http.StatusBadRequest, "downloading encrypted data is not supported")
 
 		return
@@ -256,6 +264,13 @@ func Download(c *gin.Context) {
 	fileDetails, err := database.GetFile(fileID)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "database error")
+
+		return
+	}
+
+	if fileDetails.ArchiveLocation == "" {
+		log.Errorf("archive location for file: %s not known", fileID)
+		c.String(http.StatusInternalServerError, "archive location not known")
 
 		return
 	}
@@ -311,20 +326,18 @@ func Download(c *gin.Context) {
 	}
 
 	// Get archive file handle
-	var file io.Reader
-
-	if wholeFile {
-		file, err = Backend.NewFileReader(fileDetails.ArchivePath)
-	} else {
-		file, err = Backend.NewFileReadSeeker(fileDetails.ArchivePath)
-	}
-
+	file, err := ArchiveReader.NewFileReader(c, fileDetails.ArchiveLocation, fileDetails.ArchivePath)
 	if err != nil {
 		log.Errorf("could not find archive file %s, %s", fileDetails.ArchivePath, err)
 		c.String(http.StatusInternalServerError, "archive error")
 
 		return
 	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Warnf("failed to close file reader to: %s, location: %s, error: %v", fileDetails.ArchivePath, fileDetails.ArchiveLocation, err)
+		}
+	}()
 
 	c.Header("Content-Type", "application/octet-stream")
 	if c.GetBool("S3") {
@@ -339,20 +352,15 @@ func Download(c *gin.Context) {
 		c.Header("Content-Disposition", fmt.Sprintf("filename: %v", fileID))
 		c.Header("ETag", fileDetails.DecryptedChecksum)
 		c.Header("Last-Modified", lastModified.Format(http.TimeFormat))
-
-		// set the user and server public keys that is send from htsget
-		log.Debugf("Got to setting the headers: %s", c.GetHeader("client-public-key"))
-		c.Header("Client-Public-Key", c.GetHeader("Client-Public-Key"))
 	}
 
 	if c.Request.Method == http.MethodHead {
 		// Create headers for htsget, containing size of the crypt4gh header
-		reencKey := c.GetHeader("Client-Public-Key")
 		headerSize := bytes.NewReader(fileDetails.Header).Size()
 		// Size of the header in the archive
 		c.Header("Server-Additional-Bytes", fmt.Sprint(headerSize))
-		if reencKey != "" {
-			newHeader, _ := reencryptHeader(fileDetails.Header, reencKey)
+		if requestPublicKey != "" {
+			newHeader, _ := reencryptHeader(c, fileDetails.Header, requestPublicKey)
 			headerSize = bytes.NewReader(newHeader).Size()
 			// Size of the header if the file is re-encrypted before downloading
 			c.Header("Client-Additional-Bytes", fmt.Sprint(headerSize))
@@ -372,15 +380,14 @@ func Download(c *gin.Context) {
 	switch c.Param("type") {
 	case "encrypted":
 		// The key provided in the header should be base64 encoded
-		reencKey := c.GetHeader("Client-Public-Key")
-		if reencKey == "" {
+		if requestPublicKey == "" {
 			c.String(http.StatusBadRequest, "c4gh public key is missing from the header")
 
 			return
 		}
 
-		log.Debugf("Public key from the request header = %v", reencKey)
-		newHeader, err := reencryptHeader(fileDetails.Header, reencKey)
+		log.Debugf("Public key from the request header = %v", requestPublicKey)
+		newHeader, err := reencryptHeader(c, fileDetails.Header, requestPublicKey)
 		if err != nil {
 			log.Errorf("Failed to reencrypt the file header, reason: %v", err)
 			c.String(http.StatusInternalServerError, "file re-encryption error")
@@ -389,30 +396,19 @@ func Download(c *gin.Context) {
 		}
 
 		newHr := bytes.NewReader(newHeader)
-
-		if wholeFile {
-			fileStream = io.MultiReader(newHr, file)
-		} else {
-			seeker, _ := file.(io.ReadSeeker)
-			seekStream, err := storage.SeekableMultiReader(newHr, seeker)
+		fileStream = io.MultiReader(newHr, file)
+		if !wholeFile {
+			start, end, err = adjustToStartPosition(fileStream, start, end)
 			if err != nil {
-				log.Errorf("Failed to construct SeekableMultiReader, reason: %v", err)
+				log.Errorf("Could not adjust start position: %v", err)
 				c.String(http.StatusInternalServerError, "file decoding error")
 
 				return
 			}
-			start, end, err = adjustSeekPos(seekStream, start, end)
-			if err != nil {
-				log.Errorf("Could not seek stream: %v", err)
-				c.String(http.StatusInternalServerError, "file decoding error")
-
-				return
-			}
-			fileStream = seekStream
 		}
 	default:
 		// Reencrypt header for use with the loaded internal key
-		newHeader, err := reencryptHeader(fileDetails.Header, config.Config.C4GH.PublicKeyB64)
+		newHeader, err := reencryptHeader(c, fileDetails.Header, config.Config.C4GH.PublicKeyB64)
 		if err != nil {
 			log.Errorf("Failed to reencrypt the file header, reason: %v", err)
 			c.String(http.StatusInternalServerError, "file re-encryption error")
@@ -421,20 +417,7 @@ func Download(c *gin.Context) {
 		}
 
 		newHr := bytes.NewReader(newHeader)
-
-		if wholeFile {
-			fileStream = io.MultiReader(newHr, file)
-		} else {
-			seeker, _ := file.(io.ReadSeeker)
-			fileStream, err = storage.SeekableMultiReader(newHr, seeker)
-			if err != nil {
-				log.Errorf("Failed to construct SeekableMultiReader, reason: %v", err)
-				c.String(http.StatusInternalServerError, "file decoding error")
-
-				return
-			}
-		}
-
+		fileStream = io.MultiReader(newHr, file)
 		c4ghfileStream, err := streaming.NewCrypt4GHReader(fileStream, config.Config.C4GH.PrivateKey, nil)
 		defer c4ghfileStream.Close()
 		if err != nil {
@@ -443,9 +426,9 @@ func Download(c *gin.Context) {
 
 			return
 		}
-		start, end, err = adjustSeekPos(c4ghfileStream, start, end)
+		start, end, err = adjustToStartPosition(c4ghfileStream, start, end)
 		if err != nil {
-			log.Errorf("Could not seek stream: %v", err)
+			log.Errorf("Could not adjust start position: %v", err)
 			c.String(http.StatusInternalServerError, "file decoding error")
 
 			return
@@ -462,12 +445,10 @@ func Download(c *gin.Context) {
 	}
 }
 
-var adjustSeekPos = func(fileStream io.ReadSeeker, start, end int64) (int64, int64, error) {
+func adjustToStartPosition(fileStream io.Reader, start, end int64) (int64, int64, error) {
 	if start != 0 {
-		// We don't want to read from start, skip ahead to where we should be
-		_, err := fileStream.Seek(start, 0)
-		if err != nil {
-			return 0, 0, fmt.Errorf("error occurred while finding sending start: %v", err)
+		if _, err := io.CopyN(io.Discard, fileStream, start); err != nil {
+			return 0, 0, err
 		}
 		// adjust end to reflect that the file start has been moved
 		end -= start
@@ -527,7 +508,6 @@ var sendStream = func(reader io.Reader, writer http.ResponseWriter, start, end i
 // it will be used as is. If not, the functions parameters will be used.
 // If in encrypted mode, the parameters will be adjusted to match the data block boundaries.
 var calculateCoords = func(start, end int64, htsget_range string, fileDetails *database.FileDownload, encryptedType string) (int64, int64, error) {
-	log.Warnf("calculate")
 	if htsget_range != "" {
 		startEnd := strings.Split(strings.TrimPrefix(htsget_range, "bytes="), "-")
 		if len(startEnd) > 1 {
@@ -566,4 +546,28 @@ var calculateCoords = func(start, end int64, htsget_range string, fileDetails *d
 	}
 
 	return start, headlength.Size() + bodyEnd, nil
+}
+
+func getPublicKeyFromRequest(c *gin.Context) (string, error) {
+	htsgetRsPublicKeyHeader := c.GetHeader("Htsget-Context-Public-Key")
+	clientPublicKeyHeader := c.GetHeader("Client-Public-Key")
+
+	switch {
+	case htsgetRsPublicKeyHeader != "" && clientPublicKeyHeader != "":
+		return "", errors.New("both Htsget-Context-Public-Key, and Client-Public-Key headers are set")
+	case htsgetRsPublicKeyHeader != "":
+		if _, err := base64.StdEncoding.DecodeString(htsgetRsPublicKeyHeader); err != nil {
+			return "", errors.New("invalid base64 encoding for Htsget-Context-Public-Key header")
+		}
+
+		return htsgetRsPublicKeyHeader, nil
+	case clientPublicKeyHeader != "":
+		if _, err := base64.StdEncoding.DecodeString(clientPublicKeyHeader); err != nil {
+			return "", errors.New("invalid base64 encoding for Client-Public-Key header")
+		}
+
+		return clientPublicKeyHeader, nil
+	default:
+		return "", nil
+	}
 }

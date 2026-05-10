@@ -157,6 +157,89 @@ integrationtest-sda-validator-orchestrator-run:
 integrationtest-sda-validator-orchestrator-down:
 	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-validator-orchestrator-integration.yml down -v --remove-orphans
 
+# Download v2 integration tests (sda/cmd/download, Go-based)
+# Prerequisite: run `make build-all` first if container images are not already built.
+integrationtest-sda-download-v2:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-download-v2-integration.yml up -d
+	@sleep 10
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-download-v2-integration.yml run --rm integration_test
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-download-v2-integration.yml down -v --remove-orphans
+
+integrationtest-sda-download-v2-run:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-download-v2-integration.yml run --rm integration_test
+
+integrationtest-sda-download-v2-up: build-all
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-download-v2-integration.yml up -d
+
+integrationtest-sda-download-v2-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-download-v2-integration.yml down -v --remove-orphans
+
+# Lightweight dev stack for download API v2 (webapp development)
+dev-download-v2-up: build-all
+	@PR_NUMBER=$$(date +%F) docker compose -f dev-tools/download-v2-dev/compose.yml up -d
+	@echo ""
+	@echo "Download API v2 ready at http://localhost:8085"
+	@echo "Get a token:  TOKEN=\$$(curl -s http://localhost:8000/tokens | jq -r '.[0]')"
+	@echo "Try it:       curl -H \"Authorization: Bearer \$$TOKEN\" http://localhost:8085/datasets"
+
+dev-download-v2-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f dev-tools/download-v2-dev/compose.yml down -v --remove-orphans
+
+# Download benchmark (compares old vs new public endpoints)
+# Uses sda-benchmark.yml which extends sda-s3-integration.yml with benchmark services
+# The benchmark runs in a container with auto-configuration from the environment
+benchmark-download-up: build-all
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-benchmark.yml up -d
+
+benchmark-download-run:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-benchmark.yml --profile benchmark run --rm benchmark
+
+benchmark-download-run-validated:
+	@PR_NUMBER=$$(date +%F) BENCHMARK_MODE=validated-payload docker compose -f .github/integration/sda-benchmark.yml --profile benchmark run --rm benchmark
+
+benchmark-download-down:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-benchmark.yml down --remove-orphans
+
+# Force cleanup of benchmark resources.
+# NOTE: intentionally scoped to the benchmark compose file; avoid broad name-based container deletes.
+benchmark-download-clean:
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-benchmark.yml down -v --remove-orphans
+
+# Seed only the minimal data needed for benchmarking (uses simpler benchmark-specific script)
+benchmark-download-seed:
+	@echo "Seeding minimal test data for benchmark..."
+	@PR_NUMBER=$$(date +%F) docker compose -f .github/integration/sda-benchmark.yml run --rm integration_test /scripts/seed_benchmark_data.sh
+
+benchmark-download:
+	@$(MAKE) benchmark-download-clean
+	@$(MAKE) benchmark-download-up
+	@echo "Waiting for services to become healthy..."
+	@printf "  waiting for download..."; retries=0; \
+		until curl -sf http://localhost:$$(docker port download 8080 | head -1 | cut -d: -f2)/health/ready > /dev/null 2>&1; do \
+			retries=$$((retries + 1)); if [ $$retries -ge 60 ]; then echo " TIMEOUT"; exit 1; fi; sleep 1; done; echo " ok"
+	@printf "  waiting for download-old..."; retries=0; \
+		until curl -sf http://localhost:$$(docker port download-old 8080 | head -1 | cut -d: -f2)/health > /dev/null 2>&1; do \
+			retries=$$((retries + 1)); if [ $$retries -ge 60 ]; then echo " TIMEOUT"; exit 1; fi; sleep 1; done; echo " ok"
+	@$(MAKE) benchmark-download-seed
+	@echo "Running benchmark..."
+	@$(MAKE) benchmark-download-run
+	@$(MAKE) benchmark-download-down
+
+benchmark-download-validated:
+	@$(MAKE) benchmark-download-clean
+	@$(MAKE) benchmark-download-up
+	@echo "Waiting for services to become healthy..."
+	@printf "  waiting for download..."; retries=0; \
+		until curl -sf http://localhost:$$(docker port download 8080 | head -1 | cut -d: -f2)/health/ready > /dev/null 2>&1; do \
+			retries=$$((retries + 1)); if [ $$retries -ge 60 ]; then echo " TIMEOUT"; exit 1; fi; sleep 1; done; echo " ok"
+	@printf "  waiting for download-old..."; retries=0; \
+		until curl -sf http://localhost:$$(docker port download-old 8080 | head -1 | cut -d: -f2)/health > /dev/null 2>&1; do \
+			retries=$$((retries + 1)); if [ $$retries -ge 60 ]; then echo " TIMEOUT"; exit 1; fi; sleep 1; done; echo " ok"
+	@$(MAKE) benchmark-download-seed
+	@echo "Running validated benchmark..."
+	@$(MAKE) benchmark-download-run-validated
+	@$(MAKE) benchmark-download-down
+
 # lint go code
 lint-all: lint-sda lint-sda-download lint-sda-admin
 lint-sda:
@@ -208,18 +291,28 @@ k3d-deploy-dependencies-federated:
 	@bash .github/integration/scripts/charts/dependencies.sh local federated
 k3d-deploy-dependencies-isolated:
 	@bash .github/integration/scripts/charts/dependencies.sh local isolated
+k3d-deploy-dependencies-s3:
+	@bash .github/integration/scripts/charts/dependencies.sh local s3 false
+k3d-deploy-dependencies-s3-tls:
+	@bash .github/integration/scripts/charts/dependencies.sh local s3 true
 k3d-import-images: build-all
 	@bash .github/integration/scripts/charts/import_local_images.sh k3s-default
 k3d-deploy-postgres:
 	@bash .github/integration/scripts/charts/deploy_charts.sh sda-db "$$(date +%F)" false
+k3d-deploy-postgres-tls:
+	@bash .github/integration/scripts/charts/deploy_charts.sh sda-db "$$(date +%F)" true
 k3d-deploy-rabbitmq-federated:
 	@bash .github/integration/scripts/charts/deploy_charts.sh sda-mq "$$(date +%F)" false federated
 k3d-deploy-rabbitmq-isolated:
 	@bash .github/integration/scripts/charts/deploy_charts.sh sda-mq "$$(date +%F)" false isolated
+k3d-deploy-rabbitmq-isolated-tls:
+	@bash .github/integration/scripts/charts/deploy_charts.sh sda-mq "$$(date +%F)" true isolated
 k3d-deploy-sda-s3-federated:
 	@bash .github/integration/scripts/charts/deploy_charts.sh sda-svc "$$(date +%F)" false s3 federated
 k3d-deploy-sda-s3-isolated:
 	@bash .github/integration/scripts/charts/deploy_charts.sh sda-svc "$$(date +%F)" false s3 isolated
+k3d-deploy-sda-s3-isolated-tls:
+	@bash .github/integration/scripts/charts/deploy_charts.sh sda-svc "$$(date +%F)" true s3 isolated
 k3d-deploy-sda-posix:
 	@bash .github/integration/scripts/charts/deploy_charts.sh sda-svc "$$(date +%F)" false posix
 k3d-cleanup-all-deployments:

@@ -233,7 +233,7 @@ func TestTokenMiddleware_Success_FromCache(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	_, router := gin.CreateTestContext(w)
 
-	r.AddCookie(&http.Cookie{
+	r.AddCookie(&http.Cookie{ //nolint:gosec
 		Name:  "sda_session_key",
 		Value: "key",
 	})

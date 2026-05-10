@@ -36,9 +36,12 @@ import (
 	"github.com/neicnordic/sensitive-data-archive/internal/jsonadapter"
 	"github.com/neicnordic/sensitive-data-archive/internal/reencrypt"
 	"github.com/neicnordic/sensitive-data-archive/internal/schema"
+	"github.com/neicnordic/sensitive-data-archive/internal/storage/v2"
+	"github.com/neicnordic/sensitive-data-archive/internal/storage/v2/locationbroker"
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"google.golang.org/grpc"
@@ -164,7 +167,7 @@ func TestMain(m *testing.M) {
 
 	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
 	if err := pool.Retry(func() error {
-		res, err := client.Do(req)
+		res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 		if err != nil {
 			return err
 		}
@@ -225,7 +228,7 @@ func TestMain(m *testing.M) {
 
 	// exponential backoff-retry, because the application in the container might not be ready to accept connections yet
 	if err := pool.Retry(func() error {
-		res, err := client.Do(req)
+		res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 		if err != nil {
 			return err
 		}
@@ -267,7 +270,7 @@ func TestMain(m *testing.M) {
 
 type UserKey struct {
 	PublicKey      [32]byte
-	PrivateKey     [32]byte
+	privateKey     [32]byte
 	PrivateKeyPath string
 	PubKeyBase64   string
 }
@@ -280,7 +283,6 @@ type GrpcListener struct {
 
 type TestSuite struct {
 	suite.Suite
-	Path         string
 	PublicPath   string
 	PrivatePath  string
 	KeyName      string
@@ -295,10 +297,12 @@ type TestSuite struct {
 	GoodC4ghFile string
 	BadC4ghFile  string
 	GrpcListener GrpcListener
+
+	inboxDir string
 }
 
 func helperCreateVerifiedTestFile(s *TestSuite, user, filePath string) (string, hash.Hash) {
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update status of file in database")
@@ -318,7 +322,7 @@ func helperCreateVerifiedTestFile(s *TestSuite, user, filePath string) (string, 
 		DecryptedChecksum: fmt.Sprintf("%x", decSha.Sum(nil)),
 		DecryptedSize:     948,
 	}
-	err = Conf.API.DB.SetArchived(fileInfo, fileID)
+	err = Conf.API.DB.SetArchived("/archive", fileInfo, fileID)
 	assert.NoError(s.T(), err, "failed to mark file as Archived")
 	err = Conf.API.DB.SetVerified(fileInfo, fileID)
 	assert.NoError(s.T(), err, "failed to mark file as Verified")
@@ -326,41 +330,6 @@ func helperCreateVerifiedTestFile(s *TestSuite, user, filePath string) (string, 
 	assert.NoError(s.T(), err, "failed to update status of file in database")
 
 	return fileID, decSha
-}
-
-func (s *TestSuite) TestShutdown() {
-	Conf = &config.Config{}
-	Conf.Broker = broker.MQConf{
-		Host:     "localhost",
-		Port:     mqPort,
-		User:     "guest",
-		Password: "guest",
-		Exchange: "sda",
-		Vhost:    "/sda",
-	}
-	Conf.API.MQ, err = broker.NewMQ(Conf.Broker)
-	assert.NoError(s.T(), err)
-
-	Conf.Database = database.DBConf{
-		Host:     "localhost",
-		Port:     dbPort,
-		User:     "postgres",
-		Password: "rootpasswd",
-		Database: "sda",
-		SslMode:  "disable",
-	}
-	Conf.API.DB, err = database.NewSDAdb(Conf.Database)
-	assert.NoError(s.T(), err)
-
-	// make sure all conections are alive
-	assert.Equal(s.T(), false, Conf.API.MQ.Channel.IsClosed())
-	assert.Equal(s.T(), false, Conf.API.MQ.Connection.IsClosed())
-	assert.Equal(s.T(), nil, Conf.API.DB.DB.Ping())
-
-	shutdown()
-	assert.Equal(s.T(), true, Conf.API.MQ.Channel.IsClosed())
-	assert.Equal(s.T(), true, Conf.API.MQ.Connection.IsClosed())
-	assert.Equal(s.T(), "sql: database is closed", Conf.API.DB.DB.Ping().Error())
 }
 
 func (s *TestSuite) TestReadinessResponse() {
@@ -418,11 +387,13 @@ func (s *TestSuite) TestReadinessResponse() {
 // Initialise configuration and create jwt keys
 func (s *TestSuite) SetupSuite() {
 	log.SetLevel(log.DebugLevel)
-	s.Path = "/tmp/keys/"
+
+	s.inboxDir = s.T().TempDir()
+
 	s.KeyName = "example.demo"
 
 	log.Print("Creating JWT keys for testing")
-	privpath, pubpath, err := helper.MakeFolder(s.Path)
+	privpath, pubpath, err := helper.MakeFolder(s.inboxDir)
 	assert.NoError(s.T(), err)
 	s.PrivatePath = privpath
 	s.PublicPath = pubpath
@@ -484,22 +455,41 @@ func (s *TestSuite) SetupSuite() {
 	"roles":[{"role":"admin","rolebinding":"submission"},
 	{"role":"dummy","rolebinding":"admin"}]}`)
 
-	Conf.Inbox.Posix.Location, err = os.MkdirTemp("", "inbox")
-	if err != nil {
-		s.FailNow("failed to create temp folder")
+	if err := os.WriteFile(filepath.Join(s.inboxDir, "config.yaml"), []byte(fmt.Sprintf(`
+storage:
+  inbox:
+    posix:
+    - path: %s
+`, s.inboxDir)), 0600); err != nil {
+		s.FailNow(err.Error())
 	}
 
-	s.UserKey.PublicKey, s.UserKey.PrivateKey, err = keys.GenerateKeyPair()
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	viper.SetConfigType("yaml")
+	viper.SetConfigFile(filepath.Join(s.inboxDir, "config.yaml"))
+
+	if err := viper.ReadInConfig(); err != nil {
+		s.FailNow(err.Error())
+	}
+
+	lb, err := locationbroker.NewLocationBroker(Conf.API.DB)
+	assert.NoError(s.T(), err)
+	inboxWriter, err = storage.NewWriter(context.Background(), "inbox", lb)
+	assert.NoError(s.T(), err)
+	inboxReader, err = storage.NewReader(context.Background(), "inbox")
+	assert.NoError(s.T(), err)
+
+	s.UserKey.PublicKey, s.UserKey.privateKey, err = keys.GenerateKeyPair()
 	if err != nil {
 		s.T().FailNow()
 	}
 
-	s.UserKey.PrivateKeyPath = s.Path + "/user.key"
+	s.UserKey.PrivateKeyPath = s.inboxDir + "/user.key"
 	key, err := os.Create(s.UserKey.PrivateKeyPath)
 	if err != nil {
 		s.T().FailNow()
 	}
-	if err := keys.WriteCrypt4GHX25519PrivateKey(key, s.UserKey.PrivateKey, []byte("password")); err != nil {
+	if err := keys.WriteCrypt4GHX25519PrivateKey(key, s.UserKey.privateKey, []byte("password")); err != nil {
 		s.T().FailNow()
 	}
 
@@ -518,14 +508,14 @@ func (s *TestSuite) SetupSuite() {
 	s.FileHeader, _ = hex.DecodeString("637279707434676801000000010000006c000000000000007ca283608311dacfc32703a3cc9a2b445c9a417e036ba5943e233cfc65a1f81fdcc35036a584b3f95759114f584d1e81e8cf23a9b9d1e77b9e8f8a8ee8098c2a3e9270fe6872ef9d1c948caf8423efc7ce391081da0d52a49b1e6d0706f267d6140ff12b")
 	s.FileData, _ = hex.DecodeString("e046718f01d52c626276ce5931e10afd99330c4679b3e2a43fdf18146e85bae8eaee83")
 
-	err = os.MkdirAll(path.Join(Conf.Inbox.Posix.Location, s.User), 0750)
+	err = os.MkdirAll(path.Join(s.inboxDir, s.User), 0750)
 	assert.NoError(s.T(), err, "failed to create inbox directory")
 
 	// Create test files in the inbox
 	fileContent := []byte("This is the content of the test file.")
 	contentReader := bytes.NewReader(fileContent)
-	s.GoodC4ghFile = path.Join(Conf.Inbox.Posix.Location, s.User, "test_download.c4gh")
-	s.BadC4ghFile = path.Join(Conf.Inbox.Posix.Location, s.User, "badc4ghfile.c4gh")
+	s.GoodC4ghFile = path.Join(s.inboxDir, s.User, "test_download.c4gh")
+	s.BadC4ghFile = path.Join(s.inboxDir, s.User, "badc4ghfile.c4gh")
 
 	outFile, err := os.Create(s.GoodC4ghFile)
 	if err != nil {
@@ -570,8 +560,6 @@ func (s *TestSuite) SetupSuite() {
 	}()
 }
 func (s *TestSuite) TearDownSuite() {
-	assert.NoError(s.T(), os.RemoveAll(s.Path))
-	assert.NoError(s.T(), os.RemoveAll(Conf.Inbox.Posix.Location))
 	if s.GrpcListener.gs != nil {
 		s.GrpcListener.gs.GracefulStop()
 	}
@@ -612,7 +600,7 @@ func (s *TestSuite) SetupTest() {
 		req, err := http.NewRequest(http.MethodDelete, "http://"+BrokerAPI+"/api/queues/sda/"+queue+"/contents", http.NoBody)
 		assert.NoError(s.T(), err, "failed to generate query")
 		req.SetBasicAuth("guest", "guest")
-		res, err := client.Do(req)
+		res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 		assert.NoError(s.T(), err, "failed to query broker")
 		_ = res.Body.Close()
 	}
@@ -620,11 +608,11 @@ func (s *TestSuite) SetupTest() {
 
 func (s *TestSuite) TestDatabasePingCheck() {
 	emptyDB := database.SDAdb{}
-	assert.Error(s.T(), checkDB(&emptyDB, 1*time.Second), "nil DB should fail")
+	assert.Error(s.T(), checkDB(context.TODO(), &emptyDB, 1*time.Second), "nil DB should fail")
 
 	db, err := database.NewSDAdb(Conf.Database)
 	assert.NoError(s.T(), err)
-	assert.NoError(s.T(), checkDB(db, 1*time.Second), "ping should succeed")
+	assert.NoError(s.T(), checkDB(context.TODO(), db, 1*time.Second), "ping should succeed")
 }
 
 func (s *TestSuite) TestAPIGetFiles() {
@@ -656,7 +644,7 @@ func (s *TestSuite) TestAPIGetFiles() {
 	req.Header.Add("Authorization", "Bearer "+s.Token)
 
 	// Test query when no files is in db
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 
@@ -669,14 +657,14 @@ func (s *TestSuite) TestAPIGetFiles() {
 
 	// Insert a file and make sure it is listed
 	file1 := fmt.Sprintf("/%v/TestAPIGetFiles.c4gh", s.User)
-	fileID, err := Conf.API.DB.RegisterFile(nil, file1, s.User)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, file1, s.User)
 	assert.NoError(s.T(), err, "failed to register file in database")
 
 	latestStatus := "uploaded"
 	err = Conf.API.DB.UpdateFileEventLog(fileID, latestStatus, s.User, "{}", "{}")
 	assert.NoError(s.T(), err, "got (%v) when trying to update file status")
 
-	resp, err = client.Do(req)
+	resp, err = client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 
@@ -696,7 +684,7 @@ func (s *TestSuite) TestAPIGetFiles() {
 	err = Conf.API.DB.UpdateFileEventLog(fileID, latestStatus, s.User, "{}", "{}")
 	assert.NoError(s.T(), err, "got (%v) when trying to update file status")
 
-	resp, err = client.Do(req)
+	resp, err = client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 
@@ -713,10 +701,10 @@ func (s *TestSuite) TestAPIGetFiles() {
 
 	// Insert a second file and make sure it is listed
 	file2 := fmt.Sprintf("/%v/TestAPIGetFiles2.c4gh", s.User)
-	_, err = Conf.API.DB.RegisterFile(nil, file2, s.User)
+	_, err = Conf.API.DB.RegisterFile(nil, s.inboxDir, file2, s.User)
 	assert.NoError(s.T(), err, "failed to register file in database")
 
-	resp, err = client.Do(req)
+	resp, err = client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 
@@ -739,7 +727,7 @@ func (s *TestSuite) TestAPIGetFiles() {
 
 func (s *TestSuite) TestAPIGetFiles_SubmissionFileSize() {
 	for i := 1; i <= 2; i++ {
-		fileID, err := Conf.API.DB.RegisterFile(nil, fmt.Sprintf("%s/TestGetUserFiles-00%d.c4gh", "submission_b", i), "dummy")
+		fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, fmt.Sprintf("%s/TestGetUserFiles-00%d.c4gh", "submission_b", i), "dummy")
 		if err != nil {
 			s.FailNow("failed to register file in database")
 		}
@@ -807,7 +795,7 @@ func (s *TestSuite) TestAPIGetFiles_filteredSelection() {
 				sub = "submission_b"
 			}
 
-			fileID, err := Conf.API.DB.RegisterFile(nil, fmt.Sprintf("%s/TestGetUserFiles-00%d.c4gh", sub, i), strings.ReplaceAll(user, "_", "@"))
+			fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, fmt.Sprintf("%s/TestGetUserFiles-00%d.c4gh", sub, i), strings.ReplaceAll(user, "_", "@"))
 			if err != nil {
 				s.FailNow("failed to register file in database")
 			}
@@ -869,7 +857,8 @@ func (s *TestSuite) TestGinLogLevel_Debug() {
 
 	// A specific port is enforced here so we don't have a conflict when running the LogLevel_Info test
 	Conf.API.Port = 8081
-	srv := setup(Conf)
+	srv, err := setup(Conf)
+	s.NoError(err)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
 			s.T().Logf("failure: %v", err)
@@ -891,10 +880,13 @@ func (s *TestSuite) TestGinLogLevel_Debug() {
 	}
 
 	r.Header.Add("Authorization", "Bearer "+s.Token)
-	_, err = client.Do(r) // nolint: bodyclose
+	rsp, err := client.Do(r) // #nosec G704 -- request controlled by unit test
 	if err != nil {
 		s.T().Logf("failure: %v", err)
 		s.FailNow("failed to execute HTTP request")
+	}
+	if rsp != nil && rsp.Body != nil {
+		_ = rsp.Body.Close()
 	}
 
 	// Allow logs to flush
@@ -916,10 +908,13 @@ func (s *TestSuite) TestGinLogLevel_Debug() {
 		s.FailNow("failed to create new request instance for /ready")
 	}
 
-	_, err = client.Do(r) // nolint: bodyclose
+	rsp, err = client.Do(r) // #nosec G704 -- request controlled by unit test
 	if err != nil {
 		s.T().Logf("failure: %v", err)
 		s.FailNow("failed to execute HTTP request to /ready")
+	}
+	if rsp != nil && rsp.Body != nil {
+		_ = rsp.Body.Close()
 	}
 
 	// Allow logs to flush
@@ -946,7 +941,8 @@ func (s *TestSuite) TestGinLogLevel_Info() {
 
 	// A specific port is enforced here so we don't have a conflict when running the LogLevel_Debug test
 	Conf.API.Port = 8082
-	srv := setup(Conf)
+	srv, err := setup(Conf)
+	s.NoError(err)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
 			s.T().Logf("failure: %v", err)
@@ -968,10 +964,13 @@ func (s *TestSuite) TestGinLogLevel_Info() {
 	}
 
 	r.Header.Add("Authorization", "Bearer "+s.Token)
-	_, err = client.Do(r) // nolint: bodyclose
+	rsp, err := client.Do(r) // #nosec G704 -- request controlled by unit test
 	if err != nil {
 		s.T().Logf("failure: %v", err)
 		s.FailNow("failed to execute HTTP request")
+	}
+	if rsp != nil && rsp.Body != nil {
+		_ = rsp.Body.Close()
 	}
 
 	// Allow logs to flush
@@ -993,10 +992,13 @@ func (s *TestSuite) TestGinLogLevel_Info() {
 		s.FailNow("failed to create new request instance for /ready")
 	}
 
-	_, err = client.Do(r) // nolint: bodyclose
+	rsp, err = client.Do(r) // #nosec G704 -- request controlled by unit test
 	if err != nil {
 		s.T().Logf("failure: %v", err)
 		s.FailNow("failed to execute HTTP request to /ready")
+	}
+	if rsp != nil && rsp.Body != nil {
+		_ = rsp.Body.Close()
 	}
 
 	// Allow logs to flush
@@ -1143,7 +1145,7 @@ func (s *TestSuite) TestIngestFile_WithPayload() {
 		s.FailNow("failed to setup RBAC enforcer")
 	}
 
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update satus of file in database")
@@ -1175,7 +1177,7 @@ func (s *TestSuite) TestIngestFile_WithPayload() {
 	client := http.Client{Timeout: 5 * time.Second}
 	req, _ := http.NewRequest(http.MethodGet, "http://"+BrokerAPI+"/api/queues/sda/ingest", http.NoBody)
 	req.SetBasicAuth("guest", "guest")
-	res, err := client.Do(req)
+	res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err, "failed to query broker")
 	var data struct {
 		MessagesReady int `json:"messages_ready"`
@@ -1202,7 +1204,7 @@ func (s *TestSuite) TestIngestFile_WithPayload_NoUser() {
 		s.FailNow("failed to setup RBAC enforcer")
 	}
 
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update satus of file in database")
@@ -1236,7 +1238,7 @@ func (s *TestSuite) TestIngestFile_WithPayload_WrongUser() {
 	user := "dummy"
 	filePath := "/inbox/dummy/file10.c4gh"
 
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update satus of file in database")
@@ -1269,7 +1271,7 @@ func (s *TestSuite) TestIngestFile_WrongFilePath() {
 	user := "dummy"
 	filePath := "/inbox/dummy/file10.c4gh"
 
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update satus of file in database")
@@ -1303,7 +1305,7 @@ func (s *TestSuite) TestIngestFile_WrongFilePath() {
 func (s *TestSuite) TestIngestFile_WithFileID() {
 	user := "dummy"
 	filePath := "/inbox/dummy/file11.c4gh"
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err)
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err)
@@ -1332,7 +1334,7 @@ func (s *TestSuite) TestIngestFile_WithFileID() {
 	client := http.Client{Timeout: 5 * time.Second}
 	req, _ := http.NewRequest(http.MethodGet, "http://"+BrokerAPI+"/api/queues/sda/ingest", http.NoBody)
 	req.SetBasicAuth("guest", "guest")
-	res, err := client.Do(req)
+	res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err, "failed to query broker")
 	var data struct {
 		MessagesReady int `json:"messages_ready"`
@@ -1348,7 +1350,7 @@ func (s *TestSuite) TestIngestFile_WithFileID() {
 func (s *TestSuite) TestIngestFile_WithFileID_WrongID() {
 	user := "dummy"
 	filePath := "/inbox/dummy/file11.c4gh"
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err)
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err)
@@ -1368,13 +1370,13 @@ func (s *TestSuite) TestIngestFile_WithFileID_WrongID() {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	assert.Equal(s.T(), http.StatusBadRequest, resp.StatusCode)
-	assert.Contains(s.T(), string(b), "file information not found")
+	assert.Contains(s.T(), string(b), "fileid param is invalid, not a uuid")
 }
 
 func (s *TestSuite) TestIngestFile_BothFileIDAndPayloadProvided() {
 	user := "dummy"
 	filePath := "/inbox/dummy/file12.c4gh"
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err)
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err)
@@ -1457,7 +1459,7 @@ func (s *TestSuite) TestSetAccession_WithPayload() {
 	client := http.Client{Timeout: 5 * time.Second}
 	req, _ := http.NewRequest(http.MethodGet, "http://"+BrokerAPI+"/api/queues/sda/accession", http.NoBody)
 	req.SetBasicAuth("guest", "guest")
-	res, err := client.Do(req)
+	res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err, "failed to query broker")
 	var data struct {
 		MessagesReady int `json:"messages_ready"`
@@ -1570,7 +1572,7 @@ func (s *TestSuite) TestSetAccession_WithParams() {
 	client := http.Client{Timeout: 5 * time.Second}
 	req, _ := http.NewRequest(http.MethodGet, "http://"+BrokerAPI+"/api/queues/sda/accession", http.NoBody)
 	req.SetBasicAuth("guest", "guest")
-	res, err := client.Do(req)
+	res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err, "failed to query broker")
 	var data struct {
 		MessagesReady int `json:"messages_ready"`
@@ -1608,7 +1610,7 @@ func (s *TestSuite) TestSetAccession_WithParams_WrongID() {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	assert.Equal(s.T(), http.StatusBadRequest, resp.StatusCode)
-	assert.Contains(s.T(), string(b), "file details not found")
+	assert.Contains(s.T(), string(b), "fileid param is invalid, not a uuid")
 }
 
 func (s *TestSuite) TestSetAccession_WithParams_MissingAccession() {
@@ -1711,7 +1713,7 @@ func (s *TestSuite) TestCreateDataset() {
 	user := "dummy"
 	filePath := "/inbox/dummy/file12.c4gh"
 
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update status of file in database")
@@ -1731,7 +1733,7 @@ func (s *TestSuite) TestCreateDataset() {
 		DecryptedChecksum: fmt.Sprintf("%x", decSha.Sum(nil)),
 		DecryptedSize:     948,
 	}
-	err = Conf.API.DB.SetArchived(fileInfo, fileID)
+	err = Conf.API.DB.SetArchived("/archive", fileInfo, fileID)
 	assert.NoError(s.T(), err, "failed to mark file as Archived")
 
 	err = Conf.API.DB.SetVerified(fileInfo, fileID)
@@ -1777,7 +1779,7 @@ func (s *TestSuite) TestCreateDataset() {
 	client := http.Client{Timeout: 5 * time.Second}
 	req, _ := http.NewRequest(http.MethodGet, "http://"+BrokerAPI+"/api/queues/sda/mappings", http.NoBody)
 	req.SetBasicAuth("guest", "guest")
-	res, err := client.Do(req)
+	res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err, "failed to query broker")
 	var data struct {
 		MessagesReady int `json:"messages_ready"`
@@ -1793,7 +1795,7 @@ func (s *TestSuite) TestCreateDataset_BadFormat() {
 	user := "dummy"
 	filePath := "/inbox/dummy/file12.c4gh"
 
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update satus of file in database")
@@ -1813,7 +1815,7 @@ func (s *TestSuite) TestCreateDataset_BadFormat() {
 		DecryptedChecksum: fmt.Sprintf("%x", decSha.Sum(nil)),
 		DecryptedSize:     948,
 	}
-	err = Conf.API.DB.SetArchived(fileInfo, fileID)
+	err = Conf.API.DB.SetArchived("/archive", fileInfo, fileID)
 	assert.NoError(s.T(), err, "failed to mark file as Archived")
 
 	err = Conf.API.DB.SetVerified(fileInfo, fileID)
@@ -1915,7 +1917,7 @@ func (s *TestSuite) TestCreateDataset_WrongUser() {
 	user := "dummy"
 	filePath := "/inbox/dummy/file12.c4gh"
 
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", user, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update satus of file in database")
@@ -1935,7 +1937,7 @@ func (s *TestSuite) TestCreateDataset_WrongUser() {
 		DecryptedChecksum: fmt.Sprintf("%x", decSha.Sum(nil)),
 		DecryptedSize:     948,
 	}
-	err = Conf.API.DB.SetArchived(fileInfo, fileID)
+	err = Conf.API.DB.SetArchived("/archive", fileInfo, fileID)
 	assert.NoError(s.T(), err, "failed to mark file as Archived")
 
 	err = Conf.API.DB.SetVerified(fileInfo, fileID)
@@ -1973,7 +1975,7 @@ func (s *TestSuite) TestCreateDataset_WrongUser() {
 func (s *TestSuite) TestReleaseDataset() {
 	user := "TestReleaseDataset"
 	for i := 0; i < 3; i++ {
-		fileID, err := Conf.API.DB.RegisterFile(nil, fmt.Sprintf("/%v/TestGetUserFiles-00%d.c4gh", user, i), strings.ReplaceAll(user, "_", "@"))
+		fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, fmt.Sprintf("/%v/TestGetUserFiles-00%d.c4gh", user, i), strings.ReplaceAll(user, "_", "@"))
 		if err != nil {
 			s.FailNow("failed to register file in database")
 		}
@@ -2029,7 +2031,7 @@ func (s *TestSuite) TestReleaseDataset() {
 	req, _ := http.NewRequest(http.MethodGet, "http://"+BrokerAPI+"/api/queues/sda/mappings", http.NoBody)
 	req.SetBasicAuth("guest", "guest")
 	client := http.Client{Timeout: 30 * time.Second}
-	res, err := client.Do(req)
+	res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err, "failed to query broker")
 	var data struct {
 		MessagesReady int `json:"messages_ready"`
@@ -2106,7 +2108,7 @@ func (s *TestSuite) TestReleaseDataset_DeprecatedDataset() {
 	testUsers := []string{"user_example.org", "User-B", "User-C"}
 	for _, user := range testUsers {
 		for i := 0; i < 5; i++ {
-			fileID, err := Conf.API.DB.RegisterFile(nil, fmt.Sprintf("/%v/TestGetUserFiles-00%d.c4gh", user, i), strings.ReplaceAll(user, "_", "@"))
+			fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, fmt.Sprintf("/%v/TestGetUserFiles-00%d.c4gh", user, i), strings.ReplaceAll(user, "_", "@"))
 			if err != nil {
 				s.FailNow("failed to register file in database")
 			}
@@ -2165,7 +2167,7 @@ func (s *TestSuite) TestListActiveUsers() {
 	testUsers := []string{"User-A", "User-B", "User-C"}
 	for _, user := range testUsers {
 		for i := 0; i < 3; i++ {
-			fileID, err := Conf.API.DB.RegisterFile(nil, fmt.Sprintf("/%v/TestGetUserFiles-00%d.c4gh", user, i), user)
+			fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, fmt.Sprintf("/%v/TestGetUserFiles-00%d.c4gh", user, i), user)
 			if err != nil {
 				s.FailNow("failed to register file in database")
 			}
@@ -2224,7 +2226,7 @@ func (s *TestSuite) TestListUserFiles() {
 	testUsers := []string{"user_example.org", "User-B", "User-C"}
 	for _, user := range testUsers {
 		for i := 0; i < 5; i++ {
-			fileID, err := Conf.API.DB.RegisterFile(nil, fmt.Sprintf("/%v/TestGetUserFiles-00%d.c4gh", user, i), strings.ReplaceAll(user, "_", "@"))
+			fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, fmt.Sprintf("/%v/TestGetUserFiles-00%d.c4gh", user, i), strings.ReplaceAll(user, "_", "@"))
 			if err != nil {
 				s.FailNow("failed to register file in database")
 			}
@@ -2290,7 +2292,7 @@ func (s *TestSuite) TestListUserFiles_filteredSelection() {
 				sub = "submission_b"
 			}
 
-			fileID, err := Conf.API.DB.RegisterFile(nil, fmt.Sprintf("%s/TestGetUserFiles-00%d.c4gh", sub, i), strings.ReplaceAll(user, "_", "@"))
+			fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, fmt.Sprintf("%s/TestGetUserFiles-00%d.c4gh", sub, i), strings.ReplaceAll(user, "_", "@"))
 			if err != nil {
 				s.FailNow("failed to register file in database")
 			}
@@ -2370,13 +2372,13 @@ func (s *TestSuite) TestAddC4ghHash() {
 	req.Header.Add("Authorization", "Bearer "+s.Token)
 	req.Header.Add("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 	defer resp.Body.Close()
 
 	// Isert pubkey again and expect error
-	resp2, err := client.Do(req)
+	resp2, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusConflict, resp2.StatusCode)
 	defer resp2.Body.Close()
@@ -2412,7 +2414,7 @@ func (s *TestSuite) TestAddC4ghHash_emptyJson() {
 	req.Header.Add("Authorization", "Bearer "+s.Token)
 	req.Header.Add("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusBadRequest, resp.StatusCode)
 	defer resp.Body.Close()
@@ -2447,7 +2449,7 @@ func (s *TestSuite) TestAddC4ghHash_notBase64() {
 	req.Header.Add("Authorization", "Bearer "+s.Token)
 	req.Header.Add("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusBadRequest, resp.StatusCode)
 	defer resp.Body.Close()
@@ -2478,7 +2480,7 @@ func (s *TestSuite) TestListC4ghHashes() {
 	assert.NoError(s.T(), err)
 	req.Header.Add("Authorization", "Bearer "+s.Token)
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 	defer resp.Body.Close()
@@ -2513,13 +2515,13 @@ func (s *TestSuite) TestDeprecateC4ghHash() {
 	assert.NoError(s.T(), err)
 	req.Header.Add("Authorization", "Bearer "+s.Token)
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 	defer resp.Body.Close()
 
 	// a second time gives an error since the key is alreadu deprecated
-	resp2, err := client.Do(req)
+	resp2, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusBadRequest, resp2.StatusCode)
 	defer resp2.Body.Close()
@@ -2543,7 +2545,7 @@ func (s *TestSuite) TestDeprecateC4ghHash_wrongHash() {
 	assert.NoError(s.T(), err)
 	req.Header.Add("Authorization", "Bearer "+s.Token)
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	assert.Equal(s.T(), http.StatusBadRequest, resp.StatusCode)
 	defer resp.Body.Close()
@@ -2551,7 +2553,7 @@ func (s *TestSuite) TestDeprecateC4ghHash_wrongHash() {
 
 func (s *TestSuite) TestListDatasets() {
 	for i := 0; i < 5; i++ {
-		fileID, err := Conf.API.DB.RegisterFile(nil, fmt.Sprintf("/dummy/TestGetUserFiles-00%d.c4gh", i), "dummy")
+		fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, fmt.Sprintf("/dummy/TestGetUserFiles-00%d.c4gh", i), "dummy")
 		if err != nil {
 			s.FailNow("failed to register file in database")
 		}
@@ -2609,7 +2611,7 @@ func (s *TestSuite) TestListDatasets() {
 
 func (s *TestSuite) TestListUserDatasets() {
 	for i := 0; i < 5; i++ {
-		fileID, err := Conf.API.DB.RegisterFile(nil, fmt.Sprintf("/user_example.org/TestGetUserFiles-00%d.c4gh", i), strings.ReplaceAll("user_example.org", "_", "@"))
+		fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, fmt.Sprintf("/user_example.org/TestGetUserFiles-00%d.c4gh", i), strings.ReplaceAll("user_example.org", "_", "@"))
 		if err != nil {
 			s.FailNow("failed to register file in database")
 		}
@@ -2666,7 +2668,7 @@ func (s *TestSuite) TestListUserDatasets() {
 
 func (s *TestSuite) TestListDatasetsAsUser() {
 	for i := 0; i < 5; i++ {
-		fileID, err := Conf.API.DB.RegisterFile(nil, fmt.Sprintf("/user_example.org/TestGetUserFiles-00%d.c4gh", i), s.User)
+		fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, fmt.Sprintf("/user_example.org/TestGetUserFiles-00%d.c4gh", i), s.User)
 		if err != nil {
 			s.FailNow("failed to register file in database")
 		}
@@ -2725,7 +2727,7 @@ func (s *TestSuite) TestReVerifyFile() {
 	user := "TestReVerify"
 	for i := 0; i < 3; i++ {
 		filePath := fmt.Sprintf("/%v/TestReVerify-00%d.c4gh", user, i)
-		fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+		fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 		if err != nil {
 			s.FailNow("failed to register file in database")
 		}
@@ -2753,7 +2755,7 @@ func (s *TestSuite) TestReVerifyFile() {
 			Size:              1000,
 			UploadedChecksum:  fmt.Sprintf("%x", encSha.Sum(nil)),
 		}
-		if err := Conf.API.DB.SetArchived(fileInfo, fileID); err != nil {
+		if err := Conf.API.DB.SetArchived("/archive", fileInfo, fileID); err != nil {
 			s.FailNow("failed to mark file as Archived")
 		}
 
@@ -2791,7 +2793,7 @@ func (s *TestSuite) TestReVerifyFile() {
 	req, _ := http.NewRequest(http.MethodGet, "http://"+BrokerAPI+"/api/queues/sda/archived", http.NoBody)
 	req.SetBasicAuth("guest", "guest")
 	client := http.Client{Timeout: 30 * time.Second}
-	res, err := client.Do(req)
+	res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err, "failed to query broker")
 	var data struct {
 		MessagesReady int `json:"messages_ready"`
@@ -2827,7 +2829,7 @@ func (s *TestSuite) TestReVerifyDataset() {
 	user := "TestReVerifyDataset"
 	for i := 0; i < 3; i++ {
 		filePath := fmt.Sprintf("/%v/TestReVerifyDataset-00%d.c4gh", user, i)
-		fileID, err := Conf.API.DB.RegisterFile(nil, filePath, user)
+		fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, user)
 		if err != nil {
 			s.FailNow("failed to register file in database")
 		}
@@ -2855,7 +2857,7 @@ func (s *TestSuite) TestReVerifyDataset() {
 			Size:              1000,
 			UploadedChecksum:  fmt.Sprintf("%x", encSha.Sum(nil)),
 		}
-		if err := Conf.API.DB.SetArchived(fileInfo, fileID); err != nil {
+		if err := Conf.API.DB.SetArchived("/archive", fileInfo, fileID); err != nil {
 			s.FailNow("failed to mark file as Archived")
 		}
 
@@ -2898,7 +2900,7 @@ func (s *TestSuite) TestReVerifyDataset() {
 	req, _ := http.NewRequest(http.MethodGet, "http://"+BrokerAPI+"/api/queues/sda/archived", http.NoBody)
 	req.SetBasicAuth("guest", "guest")
 	client := http.Client{Timeout: 30 * time.Second}
-	res, err := client.Do(req)
+	res, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err, "failed to query broker")
 	var data struct {
 		MessagesReady int `json:"messages_ready"`
@@ -2947,7 +2949,7 @@ func (s *TestSuite) TestDownloadFile() {
 	defer ts.Close()
 
 	// Register the file in the database
-	fileID, err := Conf.API.DB.RegisterFile(nil, filepath.Base(s.GoodC4ghFile), s.User)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filepath.Base(s.GoodC4ghFile), s.User)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", s.User, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update satus of file in database")
@@ -2959,7 +2961,7 @@ func (s *TestSuite) TestDownloadFile() {
 	req.Header.Set("C4GH-Public-Key", s.UserKey.PubKeyBase64)
 
 	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	defer resp.Body.Close()
 
@@ -2987,7 +2989,7 @@ func (s *TestSuite) TestDownloadFile_badPublicKey() {
 	req.Header.Set("C4GH-Public-Key", "invalid_key")
 
 	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	defer resp.Body.Close()
 
@@ -3013,7 +3015,7 @@ func (s *TestSuite) TestDownloadFile_fileIDNotExist() {
 	req.Header.Set("C4GH-Public-Key", s.UserKey.PubKeyBase64)
 
 	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	defer resp.Body.Close()
 
@@ -3034,7 +3036,7 @@ func (s *TestSuite) TestDownloadFile_fileNotExist() {
 
 	// Register a file in the database (but don't create the actual file)
 	filePath := fmt.Sprintf("/%v/nonexistent.c4gh", s.User)
-	fileID, err := Conf.API.DB.RegisterFile(nil, filePath, s.User)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filePath, s.User)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", s.User, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update satus of file in database")
@@ -3046,7 +3048,7 @@ func (s *TestSuite) TestDownloadFile_fileNotExist() {
 	req.Header.Set("C4GH-Public-Key", s.UserKey.PubKeyBase64)
 
 	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	defer resp.Body.Close()
 
@@ -3066,7 +3068,7 @@ func (s *TestSuite) TestDownloadFile_badC4ghFile() {
 	defer ts.Close()
 
 	// Register a file in the database (but don't create the actual file)
-	fileID, err := Conf.API.DB.RegisterFile(nil, filepath.Base(s.BadC4ghFile), s.User)
+	fileID, err := Conf.API.DB.RegisterFile(nil, s.inboxDir, filepath.Base(s.BadC4ghFile), s.User)
 	assert.NoError(s.T(), err, "failed to register file in database")
 	err = Conf.API.DB.UpdateFileEventLog(fileID, "uploaded", s.User, "{}", "{}")
 	assert.NoError(s.T(), err, "failed to update satus of file in database")
@@ -3078,7 +3080,7 @@ func (s *TestSuite) TestDownloadFile_badC4ghFile() {
 	req.Header.Set("C4GH-Public-Key", s.UserKey.PubKeyBase64)
 
 	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- request controlled by unit test
 	assert.NoError(s.T(), err)
 	defer resp.Body.Close()
 
@@ -3098,7 +3100,7 @@ func (s *TestSuite) TestReencryptHeader() {
 	}
 
 	// Call the function under test
-	newHeader, err := reencryptHeader(s.FileHeader, s.UserKey.PubKeyBase64)
+	newHeader, err := reencryptHeader(context.TODO(), s.FileHeader, s.UserKey.PubKeyBase64)
 	if err != nil {
 		s.T().Fatal("reencryptHeader failed:", err)
 	}
@@ -3112,7 +3114,7 @@ func (s *TestSuite) TestReencryptHeader_failedToConnect() {
 	// Mock the server address to an invalid one
 	Conf.API.Grpc.Host, Conf.API.Grpc.Port, _ = splitHostPort("localhost:9999")
 
-	newHeader, err := reencryptHeader(s.FileHeader, s.UserKey.PubKeyBase64)
+	newHeader, err := reencryptHeader(context.TODO(), s.FileHeader, s.UserKey.PubKeyBase64)
 	if err == nil {
 		s.T().Fatal("Expected an error due to failed connection, but got nil")
 	}

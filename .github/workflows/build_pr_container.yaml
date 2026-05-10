@@ -24,11 +24,8 @@ jobs:
       packages: write
       security-events: write
     steps:
-      - id: string-github-repo
-        name: Check String
-        uses: ASzc/change-string-case-action@v6
-        with:
-          string: ${{ github.repository }}
+      - name: Set lowercase repo name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
       - name: Checkout code
         uses: actions/checkout@v6
@@ -46,8 +43,8 @@ jobs:
           context: ./sda-download
           push: true
           tags: |
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-download
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:PR${{ github.event.number }}-download
+            ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}-download
+            ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}-download
           labels: |
             org.opencontainers.image.source=${{ github.event.repository.clone_url }}
             org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
@@ -59,8 +56,8 @@ jobs:
           context: ./sda-validator/orchestrator
           push: true
           tags: |
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-validator-orchestrator
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:PR${{ github.event.number }}-validator-orchestrator
+            ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}-validator-orchestrator
+            ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}-validator-orchestrator
           labels: |
             org.opencontainers.image.source=${{ github.event.repository.clone_url }}
             org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
@@ -72,8 +69,8 @@ jobs:
           context: ./sda
           push: true
           tags: |
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:PR${{ github.event.number }}
+            ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}
+            ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}
           labels: |
             org.opencontainers.image.source=${{ github.event.repository.clone_url }}
             org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
@@ -87,11 +84,8 @@ jobs:
       packages: write
       security-events: write
     steps:
-      - id: string-github-repo
-        name: Check String
-        uses: ASzc/change-string-case-action@v6
-        with:
-          string: ${{ github.repository }}
+      - name: Set lowercase repo name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
       - name: Checkout code
         uses: actions/checkout@v6
@@ -109,8 +103,8 @@ jobs:
           context: ./postgresql
           push: true
           tags: |
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-postgres
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:PR${{ github.event.number }}-postgres
+            ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}-postgres
+            ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}-postgres
           labels: |
             org.opencontainers.image.source=${{ github.event.repository.clone_url }}
             org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
@@ -122,20 +116,20 @@ jobs:
           context: ./rabbitmq
           push: true
           tags: |
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-rabbitmq
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:PR${{ github.event.number }}-rabbitmq
+            ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}-rabbitmq
+            ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}-rabbitmq
           labels: |
             org.opencontainers.image.source=${{ github.event.repository.clone_url }}
             org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Run Trivy vulnerability scanner on postgres
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_SKIP_DB_UPDATE: false
           TRIVY_SKIP_JAVA_DB_UPDATE: false
         with:
-          image-ref: ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-postgres
+          image-ref: ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}-postgres
           format: "sarif"
           hide-progress: true
           ignore-unfixed: true
@@ -148,12 +142,12 @@ jobs:
           category: postgres
 
       - name: Run Trivy vulnerability scanner on rabbitmq
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_SKIP_DB_UPDATE: false
           TRIVY_SKIP_JAVA_DB_UPDATE: false
         with:
-          image-ref: ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-rabbitmq
+          image-ref: ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}-rabbitmq
           format: "sarif"
           hide-progress: true
           ignore-unfixed: true
@@ -173,11 +167,8 @@ jobs:
       packages: write
       security-events: write
     steps:
-      - id: string-github-repo
-        name: Check String
-        uses: ASzc/change-string-case-action@v6
-        with:
-          string: ${{ github.repository }}
+      - name: Set lowercase repo name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
       - name: Checkout code
         uses: actions/checkout@v6
@@ -195,20 +186,20 @@ jobs:
           context: ./sda-sftp-inbox
           push: true
           tags: |
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-sftp-inbox
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:PR${{ github.event.number }}-sftp-inbox
+            ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}-sftp-inbox
+            ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}-sftp-inbox
           labels: |
             org.opencontainers.image.source=${{ github.event.repository.clone_url }}
             org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Run Trivy vulnerability scanner on sftp-inbox
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_SKIP_DB_UPDATE: false
           TRIVY_SKIP_JAVA_DB_UPDATE: false
         with:
-          image-ref: ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-sftp-inbox
+          image-ref: ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}-sftp-inbox
           format: "sarif"
           hide-progress: true
           ignore-unfixed: true
@@ -226,20 +217,17 @@ jobs:
           context: ./sda-doa
           push: true
           tags: |
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-doa
-            ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:PR${{ github.event.number }}-doa
+            ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}-doa
+            ghcr.io/${{ env.REPO_LC }}:PR${{ github.event.number }}-doa
           labels: |
             org.opencontainers.image.source=${{ github.event.repository.clone_url }}
             org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Run Trivy vulnerability scanner on doa
-        uses: aquasecurity/trivy-action@0.33.1
-        env:
-          TRIVY_SKIP_DB_UPDATE: true
-          TRIVY_SKIP_JAVA_DB_UPDATE: true
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ghcr.io/${{ steps.string-github-repo.outputs.lowercase }}:sha-${{ github.sha }}-doa
+          image-ref: ghcr.io/${{ env.REPO_LC }}:sha-${{ github.sha }}-doa
           format: "sarif"
           hide-progress: true
           ignore-unfixed: true
@@ -253,11 +241,8 @@ jobs:
     name: rabbitmq-federation-test
     runs-on: ubuntu-latest
     steps:
-      - id: string-github-repo
-        name: Check String
-        uses: ASzc/change-string-case-action@v6
-        with:
-          string: ${{ github.repository }}
+      - name: Set lowercase repo name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
       - name: Check out code
         uses: actions/checkout@v6
@@ -271,11 +256,8 @@ jobs:
     name: postgres-test-suite
     runs-on: ubuntu-latest
     steps:
-      - id: string-github-repo
-        name: Check String
-        uses: ASzc/change-string-case-action@v6
-        with:
-          string: ${{ github.repository }}
+      - name: Set lowercase repo name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
       - name: Check out code
         uses: actions/checkout@v6
@@ -292,11 +274,8 @@ jobs:
       matrix:
         storage: ["posix", "s3"]
     steps:
-      - id: string-github-repo
-        name: Check String
-        uses: ASzc/change-string-case-action@v6
-        with:
-          string: ${{ github.repository }}
+      - name: Set lowercase repo name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
       - name: Check out code
         uses: actions/checkout@v6
@@ -371,11 +350,8 @@ jobs:
             tls: "false"
             storage: "posix"
     steps:
-      - id: string-github-repo
-        name: Check String
-        uses: ASzc/change-string-case-action@v6
-        with:
-          string: ${{ github.repository }}
+      - name: Set lowercase repo name
+        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -393,7 +369,7 @@ jobs:
         shell: bash
 
       - name: Deploy external services
-        run: bash .github/integration/scripts/charts/dependencies.sh ${{matrix.deployment}} ${{matrix.storage}}
+        run: bash .github/integration/scripts/charts/dependencies.sh ${{matrix.deployment}} ${{matrix.storage}} ${{matrix.tls}}
         shell: bash
 
       - name: Deploy DB

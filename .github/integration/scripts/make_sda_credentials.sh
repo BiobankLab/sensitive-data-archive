@@ -97,8 +97,22 @@ EOD
 ## create crypt4gh key
 if [ ! -f "/shared/crypt4gh" ]; then
     echo "downloading crypt4gh"
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)
+            CRYPT4GH_ARCH="linux_x86_64"
+            ;;
+        aarch64)
+            CRYPT4GH_ARCH="linux_arm64"
+            ;;
+        *)
+            echo "Unknown architecture: $ARCH. Defaulting to linux_x86_64."
+            CRYPT4GH_ARCH="linux_x86_64"
+            ;;
+    esac
+    echo "Detected architecture: $ARCH, downloading crypt4gh for: $CRYPT4GH_ARCH"
     latest_c4gh=$(curl --retry 100 -sL https://api.github.com/repos/neicnordic/crypt4gh/releases/latest | jq -r '.name')
-    curl --retry 100 -s -L "https://github.com/neicnordic/crypt4gh/releases/download/$latest_c4gh/crypt4gh_linux_x86_64.tar.gz" | tar -xz -C /shared/ && chmod +x /shared/crypt4gh
+    curl --retry 100 -s -L "https://github.com/neicnordic/crypt4gh/releases/download/$latest_c4gh/crypt4gh_${CRYPT4GH_ARCH}.tar.gz" | tar -xz -C /shared/ && chmod +x /shared/crypt4gh
 fi
 
 if [ ! -f "/shared/c4gh.sec.pem" ]; then
@@ -121,16 +135,17 @@ if [ ! -f "/shared/rotatekey.sec.pem" ]; then
     /shared/crypt4gh generate -n /shared/rotatekey -p rotatekeyPass
 fi
 
-# register the rotation key in the db
-resp=$(psql -U postgres -h postgres -d sda -At -c "SELECT description FROM sda.encryption_keys;")
-if ! echo "$resp" | grep -q 'this is the new key to rotate to'; then
-    rotateKeyHash=$(cat /shared/rotatekey.pub.pem | awk 'NR==2' | base64 -d | xxd -p -c256)
-    resp=$(psql -U postgres -h postgres -d sda -At -c "INSERT INTO sda.encryption_keys(key_hash, description) VALUES('$rotateKeyHash', 'this is the new key to rotate to');")
-    if [ "$(echo "$resp" | tr -d '\n')" != "INSERT 0 1" ]; then
-        echo "insert keyhash failed"
+# register the rotation key in the db (idempotent)
+rotateKeyHash=$(cat /shared/rotatekey.pub.pem | awk 'NR==2' | base64 -d | xxd -p -c256)
+resp=$(psql -U postgres -h postgres -d sda -At -c "INSERT INTO sda.encryption_keys(key_hash, description) VALUES('$rotateKeyHash', 'this is the new key to rotate to') ON CONFLICT (key_hash) DO UPDATE SET description = EXCLUDED.description;")
+# psql prints e.g. "INSERT 0 1" or "INSERT 0 0" depending on conflict; accept both.
+case "$(echo "$resp" | tr -d '\n')" in
+    "INSERT 0 1"|"INSERT 0 0") : ;;
+    *)
+        echo "insert/upsert keyhash failed"
         exit 1
-    fi
-fi
+        ;;
+esac
 
 if [ ! -f "/shared/keys/ssh" ]; then
     ssh-keygen -o -a 256 -t ed25519 -f /shared/keys/ssh -N ""

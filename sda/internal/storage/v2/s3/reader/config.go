@@ -21,7 +21,7 @@ import (
 )
 
 type endpointConfig struct {
-	AccessKey      string `mapstructure:"access_key"`
+	AccessKey      string `mapstructure:"access_key"` // #nosec G117 -- needs to be exported for unmarshalling
 	CACert         string `mapstructure:"ca_cert"`
 	ChunkSize      string `mapstructure:"chunk_size"`
 	chunkSizeBytes uint64
@@ -58,11 +58,15 @@ func loadConfig(backendName string) ([]*endpointConfig, error) {
 			return nil, errors.New("missing required parameter: secret_key")
 		default:
 			switch {
-			case strings.HasPrefix(e.Endpoint, "http") && !e.DisableHTTPS:
+			case strings.HasPrefix(e.Endpoint, "http:") && !e.DisableHTTPS:
 				return nil, errors.New("http scheme in endpoint when using HTTPS")
-			case strings.HasPrefix(e.Endpoint, "https") && e.DisableHTTPS:
+			case strings.HasPrefix(e.Endpoint, "https:") && e.DisableHTTPS:
 				return nil, errors.New("https scheme in endpoint when HTTPS is disabled")
 			default:
+			}
+
+			if !strings.HasPrefix(e.Endpoint, "https:") && !strings.HasPrefix(e.Endpoint, "http:") {
+				return nil, errors.New("unsupported or no scheme in endpoint")
 			}
 
 			e.chunkSizeBytes = 50 * 1024 * 1024
@@ -77,6 +81,7 @@ func loadConfig(backendName string) ([]*endpointConfig, error) {
 				if s > 1*datasize.GB {
 					return nil, errors.New("chunk_size can not be bigger than 1gb")
 				}
+				e.chunkSizeBytes = s.Bytes()
 			}
 			if e.Region == "" {
 				e.Region = "us-east-1"

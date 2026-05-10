@@ -16,12 +16,12 @@ type DBConf struct {
 	Host       string
 	Port       int
 	User       string
-	Password   string
+	Password   string // #nosec G117 -- Export needed to access configuration atm
 	Database   string
 	CACert     string
 	SslMode    string
 	ClientCert string
-	ClientKey  string
+	ClientKey  string // #nosec G117 -- Export needed to access configuration atm
 }
 
 // SDAdb struct that acts as a receiver for the DB update methods
@@ -41,10 +41,25 @@ type FileInfo struct {
 	UploadedChecksum  string
 }
 
+type MappingData struct {
+	FileID             string
+	User               string
+	SubmissionFilePath string
+	SubmissionLocation string
+}
+
 type SyncData struct {
 	User     string
 	FilePath string
 	Checksum string
+}
+type ArchiveData struct {
+	FilePath string
+	Location string
+	FileSize int64
+
+	BackupFilePath string
+	BackupLocation string
 }
 
 type SubmissionFileInfo struct {

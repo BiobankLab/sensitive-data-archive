@@ -9,6 +9,10 @@ fi
 MQ_PORT=5672
 SCHEME=HTTP
 GRPC_PORT=50051
+ROTATE_PUB="-----BEGIN CRYPT4GH PUBLIC KEY-----
+fFmwrVXywijqMoaLX95CgIXp6klJuo5MOLf/I3+BQ1Q=
+-----END CRYPT4GH PUBLIC KEY-----"
+ROTATE_PUB_BASE64=$(printf '%s' "$ROTATE_PUB" | base64 | tr -d '\n')
 if [ "$3" == "true" ]; then
     MQ_PORT=5671
     SCHEME=HTTPS
@@ -31,6 +35,14 @@ if [ "$1" == "sda-db" ]; then
         --set persistence.enabled=false \
         --set resources=null \
         --wait
+
+    echo "Registering rotation key in database..."
+    ROTATE_HEX=$(echo "$ROTATE_PUB" | awk 'NR==2' | base64 -d | xxd -p -c256 | tr -d '\n\r ')
+    DB_POD=$(kubectl get pods -l app=postgres-sda-db -o jsonpath='{.items[0].metadata.name}')
+    kubectl exec "$DB_POD" -- env PGPASSWORD="$ROOTPASS" psql -U postgres -d sda -c "
+        INSERT INTO sda.encryption_keys (key_hash, description)
+        VALUES ('$ROTATE_HEX', 'rotation key')
+        ON CONFLICT DO NOTHING;"
 fi
 
 if [ "$1" == "sda-mq" ]; then
@@ -49,9 +61,9 @@ if [ "$1" == "sda-mq" ]; then
 
     if [ "$4" == "federated" ]; then
       if [ "$3" = true ] ; then
-        kubectl exec broker-sda-mq-0 -- rabbitmqadmin --username=admin --port=15671 --ssl --ssl-cert-file=/etc/rabbitmq/tls/tls.crt --ssl-key-file=/etc/rabbitmq/tls/tls.key --ssl-ca-cert-file=/etc/rabbitmq/tls/ca.crt --ssl-disable-hostname-verification --password="$ADMINPASS" declare queue --vhost=sda name=from_cega durable=true
+        kubectl exec broker-sda-mq-0 -- rabbitmqadmin --username admin --password "$ADMINPASS" --host 127.0.0.1 --port 15671 --use-tls --tls-cert-file /etc/rabbitmq/tls/tls.crt --tls-key-file /etc/rabbitmq/tls/tls.key --tls-ca-cert-file /etc/rabbitmq/tls/ca.crt declare queue --vhost sda --name from_cega --durable true
       else
-        kubectl exec broker-sda-mq-0 -- rabbitmqadmin --username=admin --password="$ADMINPASS" declare queue --vhost=sda name=from_cega durable=true
+        kubectl exec broker-sda-mq-0 -- rabbitmqadmin --username admin --password "$ADMINPASS" --host 127.0.0.1 declare queue --vhost sda --name from_cega --durable true
       fi
     fi
 fi
@@ -81,6 +93,8 @@ if [ "$1" == "sda-svc" ]; then
         --set s3Inbox.readinessProbe.httpGet.scheme="$SCHEME" \
         --set syncAPI.readinessProbe.httpGet.scheme="$SCHEME" \
         --set reencrypt.readinessProbe.grpc.port="$GRPC_PORT" \
+        --set global.c4gh.rotatePubKeyData="$ROTATE_PUB_BASE64" \
         -f "$dir/values.yaml" \
-        --wait
+        --wait \
+        --timeout 10m
 fi

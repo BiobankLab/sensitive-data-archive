@@ -93,7 +93,7 @@ spec:
       {{- end }}
       {{- if eq "posix" .Values.global.inbox.storageType }}
         - name: inbox
-          mountPath: {{ .Values.global.inbox.path | quote }}
+          mountPath: {{ .Values.global.inbox.volumePath | quote }}
       {{- end }}
       enableServiceLinks: false
       volumes:
@@ -111,11 +111,11 @@ spec:
         - name: tls
         {{- if or .Values.global.tls.clusterIssuer .Values.global.tls.issuer }}
           secret:
-            defaultMode: 0440
+            defaultMode: 0640
             secretName: {{ template "sda.fullname" . }}-ingest-certs
         {{- else }}
           secret:
-            defaultMode: 0440
+            defaultMode: 0640
             secretName: {{ required "An certificate issuer or a TLS secret name is required for ingest" .Values.ingest.tls.secretName }}
         {{- end }}
       {{- end }}
