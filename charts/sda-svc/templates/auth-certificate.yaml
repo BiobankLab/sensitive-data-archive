@@ -1,4 +1,4 @@
-{{- if .Values.global.tls.enabled }}
+{{- if and .Values.auth.deploy .Values.global.tls.enabled }}
 {{- if or .Values.global.tls.clusterIssuer .Values.global.tls.issuer }}
 {{- if eq "s3" .Values.global.inbox.storageType }}
 apiVersion: cert-manager.io/v1

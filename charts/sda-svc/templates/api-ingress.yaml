@@ -1,4 +1,4 @@
-{{- if (or (or (eq "all" .Values.global.deploymentType) (eq "external" .Values.global.deploymentType)) (not .Values.global.deploymentType)) }}
+{{- if and .Values.api.deploy (or (or (eq "all" .Values.global.deploymentType) (eq "external" .Values.global.deploymentType)) (not .Values.global.deploymentType)) }}
 {{- if .Values.global.ingress.deploy }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress

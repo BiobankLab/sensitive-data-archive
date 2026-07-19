@@ -492,6 +492,10 @@ credentials:
 # Service specific settings
 
 api:
+  # Deploy the API service. Independent on/off switch; when false the api
+  # Deployment/Service/Secret/Ingress/Certificate are all skipped. No dependency
+  # on other services (set false to avoid requiring reencrypt/rbac config).
+  deploy: true
   name: api
   replicaCount: 2
   livenessProbe:
@@ -527,6 +531,10 @@ api:
     secretName: ""
 
 auth:
+  # Deploy the auth service. Independent on/off switch (replaces the previous
+  # coupling to inbox.storageType=="s3"). When false the auth
+  # Deployment/Service/Secret/Ingress/Certificate are all skipped.
+  deploy: true
   name: auth
   replicaCount: 2
   livenessProbe:
