@@ -69,6 +69,10 @@ spec:
           - /bin/sh
           - -c
           - |
+            SRC_CACERTS=$(find / -xdev -name cacerts 2>/dev/null | grep -v '^/tls' | head -n1) &&
+            keytool -importkeystore \
+                    -srckeystore "$SRC_CACERTS" -srcstorepass changeit -noprompt \
+                    -destkeystore /tls/cacerts -deststorepass "${KEYSTORE_PASSWORD}" &&
             keytool -import \
                     -trustcacerts \
                     -file /tls-certs/ca.crt \
