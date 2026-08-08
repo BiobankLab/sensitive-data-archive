@@ -130,6 +130,9 @@ global:
     s3SecretKey: null
     s3Port: 443
     maxBuckets: 1
+    # Force plain HTTP for this S3 backend regardless of global.tls.enabled.
+    # null/unset => follows global.tls.enabled (HTTPS when mTLS on). true => HTTP.
+    disableHttps: null
     # The lines below are only used when storageType is "posix"
     volumePath: "/archive"
     nfsServer: ""
@@ -149,6 +152,9 @@ global:
     s3SecretKey: null
     s3Port: 443
     maxBuckets: 1
+    # Force plain HTTP for this S3 backend regardless of global.tls.enabled.
+    # null/unset => follows global.tls.enabled (HTTPS when mTLS on). true => HTTP.
+    disableHttps: null
     # The lines below are only used when storageType is "posix"
     volumePath: "/backup"
     nfsServer: ""
@@ -385,6 +391,9 @@ global:
     s3SecretKey: null
     s3Port: 443
     s3Region: ""
+    # Force plain HTTP for the S3 inbox backend regardless of global.tls.enabled.
+    # null/unset => follows global.tls.enabled (HTTPS when mTLS on). true => HTTP.
+    disableHttps: null
 
   reencrypt:
     host: ""
@@ -409,6 +418,9 @@ global:
       maxBuckets: 1
       maxObjects: null
       maxSize: ""
+      # Force plain HTTP for the S3 sync destination regardless of global.tls.enabled.
+      # null/unset => follows global.tls.enabled (HTTPS when mTLS on). true => HTTP.
+      disableHttps: null
     remote:
       host: ""
       port: ""
