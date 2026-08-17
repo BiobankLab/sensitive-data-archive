@@ -458,9 +458,11 @@ func AnonymizeFilepath(fp string, username string) string {
 }
 
 func UnanonymizeFilepath(fp string, username string) string {
-	if strings.HasPrefix(fp, strings.Replace(username, "@", "_", 1)) {
+	sanitized := strings.Replace(username, "@", "_", 1)
+	sep := string(os.PathSeparator)
+	if fp == sanitized || strings.HasPrefix(fp, sanitized+sep) || fp == username || strings.HasPrefix(fp, username+sep) {
 		return fp
 	}
 
-	return filepath.Join(strings.Replace(username, "@", "_", 1), fp)
+	return filepath.Join(sanitized, fp)
 }
